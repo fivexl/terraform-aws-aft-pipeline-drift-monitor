@@ -100,21 +100,31 @@ def head_revisions(client: Any, probe_pipeline: str, execution_id: str | None = 
     (direct invocation) the most recent probe execution is used instead.
     """
     if execution_id:
-        execution = client.get_pipeline_execution(
-            pipelineName=probe_pipeline, pipelineExecutionId=execution_id
-        )["pipelineExecution"]
-        return {
-            canonical_action(rev["name"]): rev["revisionId"]
-            for rev in execution.get("artifactRevisions", [])
-            if rev.get("name") and rev.get("revisionId")
-        }
+        revisions = _execution_revisions(client, probe_pipeline, execution_id)
+        if revisions:
+            return revisions
+        # The execution is still in progress, so fall back to the summary, which
+        # carries the same revisions once the source stage has completed.
+        for summary in executions(client, probe_pipeline, limit=5):
+            if summary.get("pipelineExecutionId") == execution_id:
+                return revisions_from_summary(summary)
 
-    summaries = executions(client, probe_pipeline, limit=5)
-    for summary in summaries:
+    for summary in executions(client, probe_pipeline, limit=5):
         revisions = revisions_from_summary(summary)
         if revisions:
             return revisions
     return {}
+
+
+def _execution_revisions(client: Any, pipeline: str, execution_id: str) -> dict[str, str]:
+    execution = client.get_pipeline_execution(
+        pipelineName=pipeline, pipelineExecutionId=execution_id
+    )["pipelineExecution"]
+    return {
+        canonical_action(rev["name"]): rev["revisionId"]
+        for rev in execution.get("artifactRevisions", [])
+        if rev.get("name") and rev.get("revisionId")
+    }
 
 
 def pipeline_status(client: Any, pipeline: str, head: dict[str, str]) -> dict[str, Any]:

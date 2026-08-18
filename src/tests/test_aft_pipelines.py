@@ -35,6 +35,18 @@ def test_head_revisions_falls_back_to_latest_execution(cp):
     assert aft_pipelines.head_revisions(cp, PROBE) == {GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}
 
 
+def test_head_revisions_falls_back_to_the_summary_of_an_in_flight_execution(cp):
+    # GetPipelineExecution has not recorded the artifact revisions yet, but the
+    # execution summary already carries them.
+    cp.hide_artifact_revisions = True
+    execution_id = cp.pipelines[PROBE][0]["pipelineExecutionId"]
+
+    assert aft_pipelines.head_revisions(cp, PROBE, execution_id) == {
+        GLOBAL: HEAD_GLOBAL,
+        ACCOUNT: HEAD_ACCOUNT,
+    }
+
+
 def test_head_revisions_empty_when_probe_never_ran(cp):
     cp.pipelines[PROBE] = []
     assert aft_pipelines.head_revisions(cp, PROBE) == {}

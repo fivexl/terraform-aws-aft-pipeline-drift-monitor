@@ -46,6 +46,9 @@ class FakeCodePipeline:
         self.pipelines = pipelines
         self.started: list[str] = []
         self.job_results: list[tuple[str, str]] = []
+        #: Set to mimic an in-progress execution that has not recorded its
+        #: artifact revisions yet.
+        self.hide_artifact_revisions = False
 
     # -- discovery ---------------------------------------------------------
     def get_paginator(self, operation: str):
@@ -65,6 +68,8 @@ class FakeCodePipeline:
     def get_pipeline_execution(self, pipelineName: str, pipelineExecutionId: str):  # noqa: N803
         for item in self.pipelines.get(pipelineName, []):
             if item["pipelineExecutionId"] == pipelineExecutionId:
+                if self.hide_artifact_revisions:
+                    return {"pipelineExecution": {}}
                 return {
                     "pipelineExecution": {
                         "artifactRevisions": [

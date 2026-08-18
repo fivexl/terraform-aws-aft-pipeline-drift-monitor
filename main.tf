@@ -54,7 +54,10 @@ locals {
 
   source_actions = [for source in local.probe_sources : source.name]
 
-  sns_topic_arn = var.sns_topic_arn != "" ? var.sns_topic_arn : aws_sns_topic.this[0].arn
+  # An existing topic wins: passing sns_topic_arn never creates one, whatever
+  # create_sns_topic says.
+  create_sns_topic = var.create_sns_topic && var.sns_topic_arn == ""
+  sns_topic_arn    = var.sns_topic_arn != "" ? var.sns_topic_arn : one(aws_sns_topic.this[*].arn)
 
   # Region is wildcarded so the policies survive AFT being deployed in another
   # region; the account id keeps the scope to this account only.

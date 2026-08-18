@@ -117,10 +117,13 @@ resource "aws_sns_topic_subscription" "email" {
 
 Start with `dry_run = true` to see what would be re-run before letting it act.
 
-To publish to a topic you already own, set `sns_topic_arn`. Its resource policy
-must allow `events.amazonaws.com` to `sns:Publish` (with an `aws:SourceAccount`
-condition) or the failure notifications are silently dropped — the module can
-only manage the policy of a topic it creates itself.
+To publish to a topic you already own, set `sns_topic_arn`. It takes precedence
+over `create_sns_topic`, so nothing is created even at the default
+`create_sns_topic = true`. Its resource policy must allow `events.amazonaws.com`
+to `sns:Publish` (with an `aws:SourceAccount` condition) or the failure
+notifications are silently dropped — the module can only manage the policy of a
+topic it creates itself. Setting `create_sns_topic = false` without an
+`sns_topic_arn` fails the plan: the module has to have somewhere to publish.
 
 Trigger a check on demand:
 
@@ -153,7 +156,7 @@ paid anyway had the pipelines been kept current.
 
 | Name | Version |
 | ---- | ------- |
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.5.7 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
 
 ## Providers
@@ -216,6 +219,7 @@ paid anyway had the pipelines been kept current.
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
 | <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. | `number` | `7` | no |
+| <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn. | `bool` | `true` | no |
 | <a name="input_detect_changes"></a> [detect\_changes](#input\_detect\_changes) | Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook. | `bool` | `true` | no |
 | <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation. | `bool` | `false` | no |
@@ -232,7 +236,7 @@ paid anyway had the pipelines been kept current.
 | <a name="input_python_runtime"></a> [python\_runtime](#input\_python\_runtime) | Lambda Python runtime. | `string` | `"python3.14"` | no |
 | <a name="input_report_schedule_expression"></a> [report\_schedule\_expression](#input\_report\_schedule\_expression) | Schedule for the status report. Set it a few hours after schedule\_expression so the pipelines started by the drift check have finished. | `string` | `"cron(0 8 * * ? *)"` | no |
 | <a name="input_schedule_expression"></a> [schedule\_expression](#input\_schedule\_expression) | Schedule for the daily drift check. Starts the revision probe pipeline, which resolves HEAD through the AFT CodeConnections connection and then invokes the drift detector. | `string` | `"cron(0 2 * * ? *)"` | no |
-| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to. Leave empty to have the module create one. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms\_key\_arn so the Lambdas can publish to it. | `string` | `""` | no |
+| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to. Takes precedence over create\_sns\_topic. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms\_key\_arn so the Lambdas can publish to it. | `string` | `""` | no |
 | <a name="input_status_report_timeout"></a> [status\_report\_timeout](#input\_status\_report\_timeout) | Timeout in seconds for the status report Lambda. | `number` | `300` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every resource that supports them. | `map(string)` | `{}` | no |
 

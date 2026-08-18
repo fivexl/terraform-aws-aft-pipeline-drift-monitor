@@ -1,13 +1,13 @@
 ########################################################################
 # Notification topic
 #
-# Created only when the caller does not supply one. All three signals - drift
-# check summary, pipeline failures and the status report - go to the same
-# topic so a single subscription covers the module.
+# Created when create_sns_topic is true and no sns_topic_arn is supplied.
+# All three signals - drift check summary, pipeline failures and the status
+# report - go to the same topic so a single subscription covers the module.
 ########################################################################
 
 resource "aws_sns_topic" "this" {
-  count = var.sns_topic_arn == "" ? 1 : 0
+  count = local.create_sns_topic ? 1 : 0
 
   name              = "${var.name_prefix}-notifications"
   display_name      = "AFT pipeline drift monitor"
@@ -16,7 +16,7 @@ resource "aws_sns_topic" "this" {
 }
 
 data "aws_iam_policy_document" "sns_topic" {
-  count = var.sns_topic_arn == "" ? 1 : 0
+  count = local.create_sns_topic ? 1 : 0
 
   statement {
     sid       = "AllowEventBridgePublish"
@@ -57,7 +57,7 @@ data "aws_iam_policy_document" "sns_topic" {
 }
 
 resource "aws_sns_topic_policy" "this" {
-  count = var.sns_topic_arn == "" ? 1 : 0
+  count = local.create_sns_topic ? 1 : 0
 
   arn    = aws_sns_topic.this[0].arn
   policy = data.aws_iam_policy_document.sns_topic[0].json

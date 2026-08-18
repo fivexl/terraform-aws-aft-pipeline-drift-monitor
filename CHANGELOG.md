@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SNS with an input transformer.
 - `status-report` Lambda publishing failures, still-running and still-drifted
   pipelines to the same SNS topic on its own schedule.
-- Optional module-managed SNS topic, or use an existing one via `sns_topic_arn`.
+- Optional module-managed SNS topic via `create_sns_topic` (default `true`), or
+  use an existing one via `sns_topic_arn`, which always takes precedence.
 
 [Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.0.0

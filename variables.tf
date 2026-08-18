@@ -67,8 +67,19 @@ variable "notify_on_drift" {
   default     = true
 }
 
+variable "create_sns_topic" {
+  description = "Whether to create the notification topic. Ignored when sns_topic_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns_topic_arn."
+  type        = bool
+  default     = true
+
+  validation {
+    condition     = var.create_sns_topic || var.sns_topic_arn != ""
+    error_message = "Set create_sns_topic = true, or supply sns_topic_arn: the module has to have a topic to publish to."
+  }
+}
+
 variable "sns_topic_arn" {
-  description = "ARN of an existing SNS topic to publish to. Leave empty to have the module create one. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms_key_arn so the Lambdas can publish to it."
+  description = "ARN of an existing SNS topic to publish to. Takes precedence over create_sns_topic. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms_key_arn so the Lambdas can publish to it."
   type        = string
   default     = ""
 }

@@ -1,0 +1,150 @@
+variable "name_prefix" {
+  description = "Prefix for every resource name created by this module."
+  type        = string
+  default     = "aft-pipeline-drift-monitor"
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{1,40}$", var.name_prefix))
+    error_message = "name_prefix must be lowercase alphanumeric with hyphens, 2-41 characters."
+  }
+}
+
+variable "pipeline_name_pattern" {
+  description = "Python regular expression the Lambdas use to select AFT customizations pipelines. The default matches AFT's own naming, `<account-id>-customizations-pipeline`."
+  type        = string
+  default     = "^\\d{12}-customizations-pipeline$"
+
+  validation {
+    condition     = length(var.pipeline_name_pattern) > 0
+    error_message = "pipeline_name_pattern must not be empty."
+  }
+}
+
+variable "failure_pipeline_name_suffix" {
+  description = "Pipeline name suffix the EventBridge failure rule matches on. Must be consistent with pipeline_name_pattern."
+  type        = string
+  default     = "-customizations-pipeline"
+}
+
+variable "schedule_expression" {
+  description = "Schedule for the daily drift check. Starts the revision probe pipeline, which resolves HEAD through the AFT CodeConnections connection and then invokes the drift detector."
+  type        = string
+  default     = "cron(0 2 * * ? *)"
+}
+
+variable "report_schedule_expression" {
+  description = "Schedule for the status report. Set it a few hours after schedule_expression so the pipelines started by the drift check have finished."
+  type        = string
+  default     = "cron(0 8 * * ? *)"
+}
+
+variable "detect_changes" {
+  description = "Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook."
+  type        = bool
+  default     = true
+}
+
+variable "dry_run" {
+  description = "Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation."
+  type        = bool
+  default     = false
+}
+
+variable "max_pipelines_per_run" {
+  description = "Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control."
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.max_pipelines_per_run >= 1
+    error_message = "max_pipelines_per_run must be at least 1."
+  }
+}
+
+variable "notify_on_drift" {
+  description = "Publish an SNS message listing the pipelines started by each drift check. Failures are always published, by the EventBridge failure rule."
+  type        = bool
+  default     = true
+}
+
+variable "sns_topic_arn" {
+  description = "ARN of an existing SNS topic to publish to. Leave empty to have the module create one. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms_key_arn so the Lambdas can publish to it."
+  type        = string
+  default     = ""
+}
+
+variable "kms_key_arn" {
+  description = "ARN of an existing KMS key used for the SNS topic and the probe pipeline's artifacts. Leave empty to have the module create one. A supplied key must allow events.amazonaws.com to kms:Decrypt and kms:GenerateDataKey*, otherwise EventBridge cannot publish the failure notifications."
+  type        = string
+  default     = ""
+}
+
+variable "kms_key_deletion_window_in_days" {
+  description = "Deletion window for the KMS key created by this module."
+  type        = number
+  default     = 30
+}
+
+variable "python_runtime" {
+  description = "Lambda Python runtime."
+  type        = string
+  default     = "python3.14"
+}
+
+variable "lambda_memory_size" {
+  description = "Memory in MB for both Lambda functions."
+  type        = number
+  default     = 512
+}
+
+variable "drift_detector_timeout" {
+  description = "Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts."
+  type        = number
+  default     = 600
+}
+
+variable "status_report_timeout" {
+  description = "Timeout in seconds for the status report Lambda."
+  type        = number
+  default     = 300
+}
+
+variable "log_retention_in_days" {
+  description = "CloudWatch Logs retention for both Lambda functions."
+  type        = number
+  default     = 30
+}
+
+variable "log_level" {
+  description = "Python log level for both Lambda functions."
+  type        = string
+  default     = "INFO"
+
+  validation {
+    condition     = contains(["DEBUG", "INFO", "WARNING", "ERROR"], var.log_level)
+    error_message = "log_level must be one of DEBUG, INFO, WARNING, ERROR."
+  }
+}
+
+variable "artifact_bucket_name" {
+  description = "Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name_prefix and the account id."
+  type        = string
+  default     = ""
+}
+
+variable "artifact_retention_days" {
+  description = "Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.artifact_retention_days >= 1
+    error_message = "artifact_retention_days must be at least 1."
+  }
+}
+
+variable "tags" {
+  description = "Tags applied to every resource that supports them."
+  type        = map(string)
+  default     = {}
+}

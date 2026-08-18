@@ -1,0 +1,258 @@
+[![FivexL](https://releases.fivexl.io/like-this-repo-banner.png)](https://fivexl.io/#email-subscription)
+
+### Want practical AWS infrastructure insights?
+
+👉 [Subscribe to our newsletter](https://fivexl.io/#email-subscription) to get:
+
+- Real stories from real AWS projects  
+- No-nonsense DevOps tactics  
+- Cost, security & compliance patterns that actually work  
+- Expert guidance from engineers in the field
+
+=========================================================================
+
+# terraform-aws-aft-pipeline-drift-monitor
+
+Keeps [AWS Control Tower Account Factory for Terraform](https://github.com/aws-ia/terraform-aws-control_tower_account_factory)
+(AFT) customizations in sync with the repositories that define them.
+
+AFT creates one CodePipeline per vended account, `<account-id>-customizations-pipeline`,
+whose source actions are configured with **`DetectChanges = false`**. Nothing
+re-runs those pipelines when you push to `aft-global-customizations` or
+`aft-account-customizations`: each account keeps whatever commit it last ran
+with until something starts it again. In a large organisation the accounts
+silently spread across many different commits.
+
+This module finds those accounts every day, re-runs them, tells you when a run
+fails, and reports the outcome a few hours later.
+
+## What it deploys
+
+```
+EventBridge (daily)                push to customizations repo (optional)
+        │                                        │
+        └──────────────►  revision probe pipeline  ◄────────────────┘
+                          │  Source: both customizations repos, via the
+                          │          existing AFT CodeConnections connection
+                          │          → CodePipeline resolves HEAD for us
+                          ▼
+                    drift detector Lambda
+                          │  compares HEAD against the commit each AFT
+                          │  pipeline last applied successfully
+                          ├──► start_pipeline_execution on the stale ones
+                          └──► SNS: "N pipelines behind HEAD, started N"
+
+EventBridge (any *-customizations-pipeline FAILED) ──────────► SNS
+
+EventBridge (a few hours later) ──► status report Lambda ────► SNS
+```
+
+Three signals, one SNS topic:
+
+| Signal | Source | When |
+|---|---|---|
+| Drift summary | `drift-detector` Lambda | Each drift check that found stale pipelines |
+| Failure alert | EventBridge → SNS directly | Any AFT customizations pipeline execution fails |
+| Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
+
+## How HEAD is resolved
+
+There is **no CodeConnections API that returns the current commit of a connected
+repository** — a connection is an authorisation grant that services use on your
+behalf, not a readable Git client. Rather than introduce a second GitHub
+credential, this module borrows CodePipeline's own resolution:
+
+1. The *revision probe* pipeline points the existing AFT connection
+   (`/aft/config/vcs/codeconnections-connection-arn`) at the same two
+   customizations repositories, using the same branches and the same source
+   action names as AFT.
+2. When it runs, CodePipeline fetches each repository through the connection and
+   reports the commit it resolved as the execution's source revision.
+3. The probe's second stage invokes the drift detector, passing the execution
+   id. That commit is HEAD.
+
+Comparing pipelines against each other instead would not work: right after a
+push *every* pipeline is behind, so the newest commit any of them has seen is
+still the old one, and nothing would ever be detected.
+
+With `detect_changes = true` (the default) the probe pipeline also runs on every
+push to either repository, so drift is corrected within minutes instead of
+waiting for the next daily run.
+
+## What counts as drift
+
+A pipeline is behind if its **last successful** execution used a different
+commit than HEAD, for either source action. The last successful execution is
+what the account is actually running — a later failed or cancelled attempt does
+not change that. A pipeline that has never succeeded is treated as drifted, so a
+failure is retried on the next check.
+
+Pipelines with an execution `InProgress` are reported but never started again.
+At most `max_pipelines_per_run` pipelines are started per check; the rest are
+deferred to the next run, which keeps CodeBuild concurrency and per-account
+Terraform state contention bounded.
+
+## Usage
+
+Deploy into the **AFT management account**, in the **AFT home region**.
+
+```hcl
+module "aft_pipeline_drift_monitor" {
+  source  = "fivexl/aft-pipeline-drift-monitor/aws"
+  version = "~> 1.0"
+
+  schedule_expression        = "cron(0 2 * * ? *)" # find and re-run stale pipelines
+  report_schedule_expression = "cron(0 8 * * ? *)" # report on what they did
+  max_pipelines_per_run      = 20
+
+  tags = { Project = "aft" }
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = module.aft_pipeline_drift_monitor.sns_topic_arn
+  protocol  = "email"
+  endpoint  = "cloud-ops@example.com"
+}
+```
+
+Start with `dry_run = true` to see what would be re-run before letting it act.
+
+To publish to a topic you already own, set `sns_topic_arn`. Its resource policy
+must allow `events.amazonaws.com` to `sns:Publish` (with an `aws:SourceAccount`
+condition) or the failure notifications are silently dropped — the module can
+only manage the policy of a topic it creates itself.
+
+Trigger a check on demand:
+
+```bash
+aws codepipeline start-pipeline-execution \
+  --name "$(terraform output -raw revision_probe_pipeline_name)"
+```
+
+## Requirements and assumptions
+
+- AFT uses a CodeConnections-backed provider (GitHub, GitHub Enterprise Server,
+  GitLab or Bitbucket). CodeCommit-based AFT installations resolve revisions
+  differently and are **not** supported.
+- AFT's SSM parameters exist in the account and region you deploy into:
+  `/aft/config/vcs/codeconnections-connection-arn`,
+  `/aft/config/{global,account}-customizations/repo-{name,branch}`.
+- Pipeline names follow AFT's convention. Override `pipeline_name_pattern` and
+  `failure_pipeline_name_suffix` together if yours differ.
+
+## Costs
+
+One extra CodePipeline execution per check (V2 pipelines are billed per action
+run), two short Lambda invocations, and a few zipped copies of the
+customizations repositories in S3 that expire after `artifact_retention_days`.
+The re-runs themselves are AFT's normal CodeBuild cost — which you would have
+paid anyway had the pipelines been kept current.
+
+<!-- BEGIN_TF_DOCS -->
+## Requirements
+
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.5.7 |
+| <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
+
+## Providers
+
+| Name | Version |
+| ---- | ------- |
+| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.60.0 |
+
+## Modules
+
+| Name | Source | Version |
+| ---- | ------ | ------- |
+| <a name="module_drift_detector"></a> [drift\_detector](#module\_drift\_detector) | terraform-aws-modules/lambda/aws | 8.2.1 |
+| <a name="module_status_report"></a> [status\_report](#module\_status\_report) | terraform-aws-modules/lambda/aws | 8.2.1 |
+
+## Resources
+
+| Name | Type |
+| ---- | ---- |
+| [aws_cloudwatch_event_rule.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_rule.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_rule.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_target.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_cloudwatch_event_target.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_cloudwatch_event_target.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_codepipeline.revision_probe](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/codepipeline) | resource |
+| [aws_iam_role.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role_policy.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_iam_role_policy.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_kms_alias.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
+| [aws_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
+| [aws_s3_bucket.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
+| [aws_s3_bucket_lifecycle_configuration.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
+| [aws_s3_bucket_policy.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_policy) | resource |
+| [aws_s3_bucket_public_access_block.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_public_access_block) | resource |
+| [aws_s3_bucket_server_side_encryption_configuration.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_server_side_encryption_configuration) | resource |
+| [aws_sns_topic.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic) | resource |
+| [aws_sns_topic_policy.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic_policy) | resource |
+| [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
+| [aws_iam_policy_document.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.drift_detector](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.eventbridge_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.probe_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.sns_topic](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
+| [aws_ssm_parameter.account_customizations_repo_branch](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssm_parameter) | data source |
+| [aws_ssm_parameter.account_customizations_repo_name](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssm_parameter) | data source |
+| [aws_ssm_parameter.codeconnections_connection_arn](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssm_parameter) | data source |
+| [aws_ssm_parameter.global_customizations_repo_branch](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssm_parameter) | data source |
+| [aws_ssm_parameter.global_customizations_repo_name](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/ssm_parameter) | data source |
+
+## Inputs
+
+| Name | Description | Type | Default | Required |
+| ---- | ----------- | ---- | ------- | :------: |
+| <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
+| <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. | `number` | `7` | no |
+| <a name="input_detect_changes"></a> [detect\_changes](#input\_detect\_changes) | Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook. | `bool` | `true` | no |
+| <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts. | `number` | `600` | no |
+| <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation. | `bool` | `false` | no |
+| <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix the EventBridge failure rule matches on. Must be consistent with pipeline\_name\_pattern. | `string` | `"-customizations-pipeline"` | no |
+| <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key used for the SNS topic and the probe pipeline's artifacts. Leave empty to have the module create one. A supplied key must allow events.amazonaws.com to kms:Decrypt and kms:GenerateDataKey*, otherwise EventBridge cannot publish the failure notifications. | `string` | `""` | no |
+| <a name="input_kms_key_deletion_window_in_days"></a> [kms\_key\_deletion\_window\_in\_days](#input\_kms\_key\_deletion\_window\_in\_days) | Deletion window for the KMS key created by this module. | `number` | `30` | no |
+| <a name="input_lambda_memory_size"></a> [lambda\_memory\_size](#input\_lambda\_memory\_size) | Memory in MB for both Lambda functions. | `number` | `512` | no |
+| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Python log level for both Lambda functions. | `string` | `"INFO"` | no |
+| <a name="input_log_retention_in_days"></a> [log\_retention\_in\_days](#input\_log\_retention\_in\_days) | CloudWatch Logs retention for both Lambda functions. | `number` | `30` | no |
+| <a name="input_max_pipelines_per_run"></a> [max\_pipelines\_per\_run](#input\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. | `number` | `20` | no |
+| <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name created by this module. | `string` | `"aft-pipeline-drift-monitor"` | no |
+| <a name="input_notify_on_drift"></a> [notify\_on\_drift](#input\_notify\_on\_drift) | Publish an SNS message listing the pipelines started by each drift check. Failures are always published, by the EventBridge failure rule. | `bool` | `true` | no |
+| <a name="input_pipeline_name_pattern"></a> [pipeline\_name\_pattern](#input\_pipeline\_name\_pattern) | Python regular expression the Lambdas use to select AFT customizations pipelines. The default matches AFT's own naming, `<account-id>-customizations-pipeline`. | `string` | `"^\\d{12}-customizations-pipeline$"` | no |
+| <a name="input_python_runtime"></a> [python\_runtime](#input\_python\_runtime) | Lambda Python runtime. | `string` | `"python3.14"` | no |
+| <a name="input_report_schedule_expression"></a> [report\_schedule\_expression](#input\_report\_schedule\_expression) | Schedule for the status report. Set it a few hours after schedule\_expression so the pipelines started by the drift check have finished. | `string` | `"cron(0 8 * * ? *)"` | no |
+| <a name="input_schedule_expression"></a> [schedule\_expression](#input\_schedule\_expression) | Schedule for the daily drift check. Starts the revision probe pipeline, which resolves HEAD through the AFT CodeConnections connection and then invokes the drift detector. | `string` | `"cron(0 2 * * ? *)"` | no |
+| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to. Leave empty to have the module create one. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms\_key\_arn so the Lambdas can publish to it. | `string` | `""` | no |
+| <a name="input_status_report_timeout"></a> [status\_report\_timeout](#input\_status\_report\_timeout) | Timeout in seconds for the status report Lambda. | `number` | `300` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every resource that supports them. | `map(string)` | `{}` | no |
+
+## Outputs
+
+| Name | Description |
+| ---- | ----------- |
+| <a name="output_artifact_bucket_name"></a> [artifact\_bucket\_name](#output\_artifact\_bucket\_name) | Name of the S3 bucket holding the revision probe pipeline's artifacts. |
+| <a name="output_daily_drift_check_rule_name"></a> [daily\_drift\_check\_rule\_name](#output\_daily\_drift\_check\_rule\_name) | Name of the EventBridge rule that runs the daily drift check. |
+| <a name="output_drift_detector_function_arn"></a> [drift\_detector\_function\_arn](#output\_drift\_detector\_function\_arn) | ARN of the drift detector Lambda function. |
+| <a name="output_drift_detector_function_name"></a> [drift\_detector\_function\_name](#output\_drift\_detector\_function\_name) | Name of the drift detector Lambda function. |
+| <a name="output_pipeline_failed_rule_name"></a> [pipeline\_failed\_rule\_name](#output\_pipeline\_failed\_rule\_name) | Name of the EventBridge rule that forwards pipeline failures to SNS. |
+| <a name="output_revision_probe_pipeline_arn"></a> [revision\_probe\_pipeline\_arn](#output\_revision\_probe\_pipeline\_arn) | ARN of the revision probe pipeline. |
+| <a name="output_revision_probe_pipeline_name"></a> [revision\_probe\_pipeline\_name](#output\_revision\_probe\_pipeline\_name) | Name of the pipeline that resolves HEAD of the customizations repositories through the AFT CodeConnections connection. |
+| <a name="output_sns_topic_arn"></a> [sns\_topic\_arn](#output\_sns\_topic\_arn) | ARN of the topic every notification is published to - either the one supplied by the caller or the one this module created. |
+| <a name="output_status_report_function_arn"></a> [status\_report\_function\_arn](#output\_status\_report\_function\_arn) | ARN of the status report Lambda function. |
+| <a name="output_status_report_function_name"></a> [status\_report\_function\_name](#output\_status\_report\_function\_name) | Name of the status report Lambda function. |
+| <a name="output_status_report_rule_name"></a> [status\_report\_rule\_name](#output\_status\_report\_rule\_name) | Name of the EventBridge rule that runs the status report. |
+<!-- END_TF_DOCS -->
+
+## License
+
+Apache 2.0 — see [LICENSE](LICENSE).

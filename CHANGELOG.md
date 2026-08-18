@@ -1,0 +1,27 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [1.0.0] - 2026-08-18
+
+### Added
+
+- Revision probe CodePipeline that resolves HEAD of the AFT global and account
+  customizations repositories through the existing AFT CodeConnections
+  connection, on a daily schedule and (optionally) on every push.
+- `drift-detector` Lambda that compares every `<account-id>-customizations-pipeline`
+  against HEAD and starts the ones whose last successful execution is behind,
+  bounded by `max_pipelines_per_run` and skippable with `dry_run`.
+- EventBridge rule forwarding AFT customizations pipeline failures straight to
+  SNS with an input transformer.
+- `status-report` Lambda publishing failures, still-running and still-drifted
+  pipelines to the same SNS topic on its own schedule.
+- Optional module-managed SNS topic, or use an existing one via `sns_topic_arn`.
+
+[Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.0.0

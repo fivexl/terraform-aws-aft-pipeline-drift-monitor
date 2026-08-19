@@ -234,3 +234,83 @@ data "aws_iam_policy_document" "status_report" {
     resources = [local.kms_key_arn]
   }
 }
+
+########################################################################
+# Weekly full run - every pipeline, drift or not
+#
+# The drift detector only re-runs accounts whose commit is behind HEAD. This
+# is the periodic baseline apply: it re-applies the customizations to every
+# account, so drift inside an account (manual console changes) is corrected
+# too, not just drift in the repository.
+########################################################################
+
+module "full_run" {
+  source  = "terraform-aws-modules/lambda/aws"
+  version = "8.2.1"
+
+  function_name = "${var.name_prefix}-full-run"
+  description   = "Starts every AFT customizations pipeline on a weekly schedule, regardless of drift"
+  handler       = "run_all.lambda_handler"
+  runtime       = var.python_runtime
+  timeout       = var.full_run_timeout
+  memory_size   = var.lambda_memory_size
+  publish       = true
+
+  source_path = local.lambda_source_path
+  hash_extra  = "full-run"
+
+  environment_variables = merge(local.lambda_environment, {
+    DRY_RUN               = tostring(var.dry_run)
+    MAX_PIPELINES_PER_RUN = tostring(var.max_pipelines_per_run)
+  })
+
+  attach_policy_json = true
+  policy_json        = data.aws_iam_policy_document.full_run.json
+
+  cloudwatch_logs_retention_in_days = var.log_retention_in_days
+
+  # The schedule targets the unqualified function ARN, so the permission has to
+  # be attached there rather than to the published version.
+  create_current_version_allowed_triggers = false
+
+  allowed_triggers = {
+    schedule = {
+      principal  = "events.amazonaws.com"
+      source_arn = aws_cloudwatch_event_rule.weekly_full_run.arn
+    }
+  }
+
+  tags = var.tags
+}
+
+data "aws_iam_policy_document" "full_run" {
+  statement {
+    sid       = "DiscoverPipelines"
+    actions   = ["codepipeline:ListPipelines"]
+    resources = ["*"] # ListPipelines does not support resource-level permissions
+  }
+
+  statement {
+    sid = "InspectAndRunAftPipelines"
+    actions = [
+      "codepipeline:ListPipelineExecutions",
+      "codepipeline:StartPipelineExecution",
+    ]
+    resources = local.aft_pipeline_arns
+  }
+
+  statement {
+    sid       = "Notify"
+    actions   = ["sns:Publish"]
+    resources = [local.sns_topic_arn]
+  }
+
+  statement {
+    sid = "UseEncryptionKey"
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey*",
+    ]
+    resources = [local.kms_key_arn]
+  }
+}

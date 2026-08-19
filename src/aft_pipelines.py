@@ -153,6 +153,28 @@ def _isoformat(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
+def start_pipelines(
+    client: Any, statuses: list[dict[str, Any]], max_runs: int, dry_run: bool = False
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Start up to ``max_runs`` pipelines, returning ``(started, deferred)``.
+
+    Deferring rather than starting everything keeps CodeBuild concurrency and
+    per-account Terraform state contention bounded.
+    """
+    selected, deferred = statuses[:max_runs], statuses[max_runs:]
+    started: list[dict[str, Any]] = []
+    for status in selected:
+        name = status["pipeline"]
+        if dry_run:
+            logger.info("DRY_RUN: would start %s", name)
+            continue
+        execution = client.start_pipeline_execution(name=name)
+        status["triggered_execution_id"] = execution.get("pipelineExecutionId")
+        started.append(status)
+        logger.info("Started %s (execution %s)", name, status["triggered_execution_id"])
+    return started, deferred
+
+
 def publish(client: Any, topic_arn: str, subject: str, message: str) -> None:
     """Publish to SNS, truncating to the service limits."""
     if not topic_arn:

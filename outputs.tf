@@ -38,6 +38,21 @@ output "status_report_function_arn" {
   value       = module.status_report.lambda_function_arn
 }
 
+output "full_run_function_name" {
+  description = "Name of the weekly full run Lambda function."
+  value       = module.full_run.lambda_function_name
+}
+
+output "full_run_function_arn" {
+  description = "ARN of the weekly full run Lambda function."
+  value       = module.full_run.lambda_function_arn
+}
+
+output "weekly_full_run_rule_name" {
+  description = "Name of the EventBridge rule that runs every pipeline weekly."
+  value       = aws_cloudwatch_event_rule.weekly_full_run.name
+}
+
 output "daily_drift_check_rule_name" {
   description = "Name of the EventBridge rule that runs the daily drift check."
   value       = aws_cloudwatch_event_rule.daily_drift_check.name

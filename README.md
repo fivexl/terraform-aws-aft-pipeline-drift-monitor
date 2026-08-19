@@ -45,15 +45,37 @@ EventBridge (daily)                push to customizations repo (optional)
 EventBridge (any *-customizations-pipeline FAILED) ──────────► SNS
 
 EventBridge (a few hours later) ──► status report Lambda ────► SNS
+
+EventBridge (weekly) ──────────────► full run Lambda ────────► starts EVERY
+                                                               pipeline, then SNS
 ```
 
-Three signals, one SNS topic:
+Four signals, one SNS topic:
 
 | Signal | Source | When |
 |---|---|---|
 | Drift summary | `drift-detector` Lambda | Each drift check that found stale pipelines |
 | Failure alert | EventBridge → SNS directly | Any AFT customizations pipeline execution fails |
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
+| Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
+
+## Two different kinds of drift
+
+The daily check and the weekly full run answer different questions, which is why
+both exist:
+
+- **Repository drift** — the account is applied at an older commit than HEAD. The
+  drift detector finds this and re-runs only the affected accounts.
+- **Account drift** — the account no longer matches the customizations that were
+  applied to it, because somebody changed something in the console. No commit
+  comparison can see this. The weekly full run corrects it by re-applying the
+  customizations to **every** account whether or not its commit is current.
+
+The full run skips pipelines with an execution already in flight: starting one
+supersedes the running execution, which would abort a half-applied Terraform run.
+It obeys the same `max_pipelines_per_run` cap and `dry_run` flag as the drift
+check — note that anything the cap defers waits for the *next weekly* run, so
+keep the cap at or above your account count if you want a full sweep every week.
 
 ## How HEAD is resolved
 
@@ -101,9 +123,10 @@ module "aft_pipeline_drift_monitor" {
   source  = "fivexl/aft-pipeline-drift-monitor/aws"
   version = "~> 1.0"
 
-  schedule_expression        = "cron(0 2 * * ? *)" # find and re-run stale pipelines
-  report_schedule_expression = "cron(0 8 * * ? *)" # report on what they did
-  max_pipelines_per_run      = 20
+  schedule_expression          = "cron(0 2 * * ? *)"    # find and re-run stale pipelines
+  report_schedule_expression   = "cron(0 8 * * ? *)"    # report on what they did
+  full_run_schedule_expression = "cron(0 6 ? * MON *)"  # Monday: re-run everything
+  max_pipelines_per_run        = 20
 
   tags = { Project = "aft" }
 }
@@ -146,10 +169,12 @@ aws codepipeline start-pipeline-execution \
 ## Costs
 
 One extra CodePipeline execution per check (V2 pipelines are billed per action
-run), two short Lambda invocations, and a few zipped copies of the
+run), three short Lambda invocations, and a few zipped copies of the
 customizations repositories in S3 that expire after `artifact_retention_days`.
 The re-runs themselves are AFT's normal CodeBuild cost — which you would have
-paid anyway had the pipelines been kept current.
+paid anyway had the pipelines been kept current. The weekly full run is the one
+deliberate extra: it re-applies every account once a week even when nothing
+changed, so budget one CodeBuild run per account per week.
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
@@ -170,6 +195,7 @@ paid anyway had the pipelines been kept current.
 | Name | Source | Version |
 | ---- | ------ | ------- |
 | <a name="module_drift_detector"></a> [drift\_detector](#module\_drift\_detector) | terraform-aws-modules/lambda/aws | 8.2.1 |
+| <a name="module_full_run"></a> [full\_run](#module\_full\_run) | terraform-aws-modules/lambda/aws | 8.2.1 |
 | <a name="module_status_report"></a> [status\_report](#module\_status\_report) | terraform-aws-modules/lambda/aws | 8.2.1 |
 
 ## Resources
@@ -179,9 +205,11 @@ paid anyway had the pipelines been kept current.
 | [aws_cloudwatch_event_rule.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
+| [aws_cloudwatch_event_rule.weekly_full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_target.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_cloudwatch_event_target.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_cloudwatch_event_target.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
+| [aws_cloudwatch_event_target.weekly_full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_codepipeline.revision_probe](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/codepipeline) | resource |
 | [aws_iam_role.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
@@ -201,6 +229,7 @@ paid anyway had the pipelines been kept current.
 | [aws_iam_policy_document.drift_detector](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.probe_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
@@ -224,6 +253,8 @@ paid anyway had the pipelines been kept current.
 | <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation. | `bool` | `false` | no |
 | <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix the EventBridge failure rule matches on. Must be consistent with pipeline\_name\_pattern. | `string` | `"-customizations-pipeline"` | no |
+| <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC. Set it after schedule\_expression so it does not race the daily drift check. | `string` | `"cron(0 6 ? * MON *)"` | no |
+| <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It walks every AFT pipeline's execution history before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key used for the SNS topic and the probe pipeline's artifacts. Leave empty to have the module create one. A supplied key must allow events.amazonaws.com to kms:Decrypt and kms:GenerateDataKey*, otherwise EventBridge cannot publish the failure notifications. | `string` | `""` | no |
 | <a name="input_kms_key_deletion_window_in_days"></a> [kms\_key\_deletion\_window\_in\_days](#input\_kms\_key\_deletion\_window\_in\_days) | Deletion window for the KMS key created by this module. | `number` | `30` | no |
 | <a name="input_lambda_memory_size"></a> [lambda\_memory\_size](#input\_lambda\_memory\_size) | Memory in MB for both Lambda functions. | `number` | `512` | no |
@@ -248,6 +279,8 @@ paid anyway had the pipelines been kept current.
 | <a name="output_daily_drift_check_rule_name"></a> [daily\_drift\_check\_rule\_name](#output\_daily\_drift\_check\_rule\_name) | Name of the EventBridge rule that runs the daily drift check. |
 | <a name="output_drift_detector_function_arn"></a> [drift\_detector\_function\_arn](#output\_drift\_detector\_function\_arn) | ARN of the drift detector Lambda function. |
 | <a name="output_drift_detector_function_name"></a> [drift\_detector\_function\_name](#output\_drift\_detector\_function\_name) | Name of the drift detector Lambda function. |
+| <a name="output_full_run_function_arn"></a> [full\_run\_function\_arn](#output\_full\_run\_function\_arn) | ARN of the weekly full run Lambda function. |
+| <a name="output_full_run_function_name"></a> [full\_run\_function\_name](#output\_full\_run\_function\_name) | Name of the weekly full run Lambda function. |
 | <a name="output_pipeline_failed_rule_name"></a> [pipeline\_failed\_rule\_name](#output\_pipeline\_failed\_rule\_name) | Name of the EventBridge rule that forwards pipeline failures to SNS. |
 | <a name="output_revision_probe_pipeline_arn"></a> [revision\_probe\_pipeline\_arn](#output\_revision\_probe\_pipeline\_arn) | ARN of the revision probe pipeline. |
 | <a name="output_revision_probe_pipeline_name"></a> [revision\_probe\_pipeline\_name](#output\_revision\_probe\_pipeline\_name) | Name of the pipeline that resolves HEAD of the customizations repositories through the AFT CodeConnections connection. |
@@ -255,6 +288,7 @@ paid anyway had the pipelines been kept current.
 | <a name="output_status_report_function_arn"></a> [status\_report\_function\_arn](#output\_status\_report\_function\_arn) | ARN of the status report Lambda function. |
 | <a name="output_status_report_function_name"></a> [status\_report\_function\_name](#output\_status\_report\_function\_name) | Name of the status report Lambda function. |
 | <a name="output_status_report_rule_name"></a> [status\_report\_rule\_name](#output\_status\_report\_rule\_name) | Name of the EventBridge rule that runs the status report. |
+| <a name="output_weekly_full_run_rule_name"></a> [weekly\_full\_run\_rule\_name](#output\_weekly\_full\_run\_rule\_name) | Name of the EventBridge rule that runs every pipeline weekly. |
 <!-- END_TF_DOCS -->
 
 ## License

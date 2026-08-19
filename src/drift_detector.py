@@ -26,6 +26,7 @@ from aft_pipelines import (
     pipeline_status,
     publish,
     short,
+    start_pipelines,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ def detect_and_run(job: dict) -> dict:
     pipelines = list_aft_pipelines(codepipeline, pattern)
     logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
 
-    drifted, skipped, started = [], [], []
+    drifted, skipped = [], []
     for name in pipelines:
         status = pipeline_status(codepipeline, name, head)
         if not status["drifted"]:
@@ -97,17 +98,8 @@ def detect_and_run(job: dict) -> dict:
             continue
         drifted.append(status)
 
-    for status in drifted[:max_runs]:
-        name = status["pipeline"]
-        if dry_run:
-            logger.info("DRY_RUN: would start %s", name)
-            continue
-        execution = codepipeline.start_pipeline_execution(name=name)
-        status["triggered_execution_id"] = execution.get("pipelineExecutionId")
-        started.append(status)
-        logger.info("Started %s (execution %s)", name, status["triggered_execution_id"])
+    started, deferred = start_pipelines(codepipeline, drifted, max_runs, dry_run)
 
-    deferred = drifted[max_runs:]
     summary = {
         "probe_pipeline": probe_pipeline,
         "head_revisions": head,

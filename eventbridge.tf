@@ -112,3 +112,20 @@ resource "aws_cloudwatch_event_target" "status_report" {
   target_id = "status-report-lambda"
   arn       = module.status_report.lambda_function_arn
 }
+
+########################################################################
+# Weekly full run
+########################################################################
+
+resource "aws_cloudwatch_event_rule" "weekly_full_run" {
+  name                = "${var.name_prefix}-weekly-full-run"
+  description         = "Start every AFT customizations pipeline once a week, regardless of drift"
+  schedule_expression = var.full_run_schedule_expression
+  tags                = var.tags
+}
+
+resource "aws_cloudwatch_event_target" "weekly_full_run" {
+  rule      = aws_cloudwatch_event_rule.weekly_full_run.name
+  target_id = "full-run-lambda"
+  arn       = module.full_run.lambda_function_arn
+}

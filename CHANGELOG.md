@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pipelines to the same SNS topic on its own schedule.
 - Optional module-managed SNS topic via `create_sns_topic` (default `true`), or
   use an existing one via `sns_topic_arn`, which always takes precedence.
+- `full-run` Lambda on a weekly schedule (`full_run_schedule_expression`,
+  default Monday 06:00 UTC) that starts every AFT customizations pipeline
+  regardless of drift, skipping executions already in flight. Corrects drift
+  inside an account, which no commit comparison can detect.
 
 [Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.0.0

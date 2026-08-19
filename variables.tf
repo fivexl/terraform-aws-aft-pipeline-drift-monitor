@@ -38,6 +38,12 @@ variable "report_schedule_expression" {
   default     = "cron(0 8 * * ? *)"
 }
 
+variable "full_run_schedule_expression" {
+  description = "Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC. Set it after schedule_expression so it does not race the daily drift check."
+  type        = string
+  default     = "cron(0 6 ? * MON *)"
+}
+
 variable "detect_changes" {
   description = "Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook."
   type        = bool
@@ -118,6 +124,12 @@ variable "status_report_timeout" {
   description = "Timeout in seconds for the status report Lambda."
   type        = number
   default     = 300
+}
+
+variable "full_run_timeout" {
+  description = "Timeout in seconds for the weekly full run Lambda. It walks every AFT pipeline's execution history before starting it, so scale it with the number of vended accounts."
+  type        = number
+  default     = 600
 }
 
 variable "log_retention_in_days" {

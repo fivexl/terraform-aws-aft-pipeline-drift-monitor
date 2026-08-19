@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -31,7 +31,7 @@ def summary(status: str, global_rev: str, account_rev: str, minutes_ago: int = 0
     return {
         "pipelineExecutionId": f"exec-{status}-{minutes_ago}",
         "status": status,
-        "startTime": datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc),
+        "startTime": datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         "sourceRevisions": [
             {"actionName": GLOBAL, "revisionId": global_rev},
             {"actionName": ACCOUNT, "revisionId": account_rev},
@@ -89,7 +89,7 @@ class FakeCodePipeline:
     def put_job_success_result(self, jobId: str):  # noqa: N803
         self.job_results.append((jobId, "success"))
 
-    def put_job_failure_result(self, jobId: str, failureDetails: dict):  # noqa: N803
+    def put_job_failure_result(self, jobId: str, failureDetails: dict):  # noqa: ARG002, N803
         self.job_results.append((jobId, "failure"))
 
 

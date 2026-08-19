@@ -157,7 +157,8 @@ data "aws_iam_policy_document" "drift_detector" {
     sid = "UseEncryptionKey"
     actions = [
       "kms:Decrypt",
-      "kms:GenerateDataKey*",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
     ]
     resources = [local.kms_key_arn]
   }
@@ -229,7 +230,8 @@ data "aws_iam_policy_document" "status_report" {
     sid = "UseEncryptionKey"
     actions = [
       "kms:Decrypt",
-      "kms:GenerateDataKey*",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
     ]
     resources = [local.kms_key_arn]
   }
@@ -309,7 +311,8 @@ data "aws_iam_policy_document" "full_run" {
     sid = "UseEncryptionKey"
     actions = [
       "kms:Decrypt",
-      "kms:GenerateDataKey*",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
     ]
     resources = [local.kms_key_arn]
   }

@@ -42,7 +42,7 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
     job_id = job.get("id")
     try:
         result = detect_and_run(job)
-    except Exception as exc:  # noqa: BLE001 - must not leave the pipeline hanging
+    except Exception as exc:  # must not leave the CodePipeline job hanging
         logger.exception("Drift detection failed")
         if job_id:
             # The pipeline goes FAILED, and the EventBridge failure rule alerts.

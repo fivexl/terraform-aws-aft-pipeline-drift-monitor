@@ -13,7 +13,7 @@ def wire_clients(monkeypatch, cp, sns):
     monkeypatch.setattr(status_report, "sns", sns)
 
 
-def test_report_buckets_pipelines_by_outcome(cp, sns):
+def test_report_buckets_pipelines_by_outcome(sns):
     report = status_report.lambda_handler({}, None)
 
     assert report["total"] == 4

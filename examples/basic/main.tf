@@ -15,6 +15,11 @@ module "aft_pipeline_drift_monitor" {
   # 08:00 UTC: report what those runs did.
   report_schedule_expression = "cron(0 8 * * ? *)"
 
+  # Monday 06:00 UTC: re-run EVERY pipeline, drift or not, to correct drift that
+  # happened inside an account rather than in the repository. Push this out to a
+  # far-future cron if you only want commit-driven re-runs.
+  full_run_schedule_expression = "cron(0 6 ? * MON *)"
+
   # Don't stampede CodeBuild and the account Terraform states.
   max_pipelines_per_run = 20
 

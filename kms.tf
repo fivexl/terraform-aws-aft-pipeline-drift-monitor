@@ -31,7 +31,8 @@ data "aws_iam_policy_document" "kms" {
     sid = "AllowEventBridgeToPublishEncryptedNotifications"
     actions = [
       "kms:Decrypt",
-      "kms:GenerateDataKey*",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
     ]
     resources = ["*"]
 

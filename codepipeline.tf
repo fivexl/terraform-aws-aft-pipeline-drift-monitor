@@ -92,18 +92,25 @@ resource "aws_iam_role" "probe_pipeline" {
 
 data "aws_iam_policy_document" "probe_pipeline" {
   statement {
-    sid = "Artifacts"
+    sid = "ArtifactBucket"
     actions = [
       "s3:GetBucketLocation",
       "s3:GetBucketVersioning",
+    ]
+    resources = [aws_s3_bucket.artifacts.arn]
+  }
+
+  # An object-level grant cannot avoid the key wildcard: CodePipeline generates the
+  # artifact keys. Scope is one dedicated, module-owned bucket.
+  #tfsec:ignore:AVD-AWS-0057
+  statement {
+    sid = "ArtifactObjects"
+    actions = [
       "s3:GetObject",
       "s3:GetObjectVersion",
       "s3:PutObject",
     ]
-    resources = [
-      aws_s3_bucket.artifacts.arn,
-      "${aws_s3_bucket.artifacts.arn}/*",
-    ]
+    resources = ["${aws_s3_bucket.artifacts.arn}/*"]
   }
 
   statement {
@@ -118,12 +125,9 @@ data "aws_iam_policy_document" "probe_pipeline" {
   }
 
   statement {
-    sid     = "InvokeDriftDetector"
-    actions = ["lambda:InvokeFunction"]
-    resources = [
-      module.drift_detector.lambda_function_arn,
-      "${module.drift_detector.lambda_function_arn}:*",
-    ]
+    sid       = "InvokeDriftDetector"
+    actions   = ["lambda:InvokeFunction"]
+    resources = [module.drift_detector.lambda_function_arn]
   }
 
   statement {
@@ -138,8 +142,10 @@ data "aws_iam_policy_document" "probe_pipeline" {
       "kms:Decrypt",
       "kms:DescribeKey",
       "kms:Encrypt",
-      "kms:GenerateDataKey*",
-      "kms:ReEncrypt*",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
+      "kms:ReEncryptFrom",
+      "kms:ReEncryptTo",
     ]
     resources = [local.kms_key_arn]
   }
@@ -158,10 +164,19 @@ resource "aws_iam_role_policy" "probe_pipeline" {
 # are only fetched so CodePipeline reports the commit it resolved.
 ########################################################################
 
+#tfsec:ignore:AVD-AWS-0089 - access logging would need a second permanent bucket to log a bucket that only ever holds ephemeral repo zips
 resource "aws_s3_bucket" "artifacts" {
   bucket        = var.artifact_bucket_name != "" ? var.artifact_bucket_name : "${var.name_prefix}-artifacts-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
   tags          = var.tags
+}
+
+resource "aws_s3_bucket_versioning" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "artifacts" {
@@ -195,6 +210,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
 
     expiration {
       days = var.artifact_retention_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.artifact_retention_days
     }
 
     abort_incomplete_multipart_upload {

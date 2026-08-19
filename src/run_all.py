@@ -77,12 +77,12 @@ def _subject(summary: dict) -> str:
 
 
 def _format_message(summary: dict) -> str:
+    count = len(summary["eligible"]) - len(summary["deferred_over_limit"])
     lines = [
         "AFT customizations weekly full run - every pipeline, drift or not.",
         "",
         f"Pipelines found: {summary['pipelines_found']}",
-        f"{'Would start' if summary['dry_run'] else 'Started'}:    "
-        f"{len(summary['eligible']) - len(summary['deferred_over_limit'])}",
+        f"{'Would start' if summary['dry_run'] else 'Started'}:    {count}",
         f"Skipped (running): {len(summary['skipped_already_running'])}",
     ]
     for label, key in (

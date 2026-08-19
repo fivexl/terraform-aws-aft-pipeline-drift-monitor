@@ -14,8 +14,8 @@ import os
 import boto3
 
 from aft_pipelines import (
-    DEFAULT_PIPELINE_PATTERN,
     ACTIVE_STATES,
+    DEFAULT_PIPELINE_PATTERN,
     configure_logging,
     head_revisions,
     list_aft_pipelines,

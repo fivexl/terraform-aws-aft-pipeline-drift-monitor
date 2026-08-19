@@ -42,7 +42,7 @@ DEFAULT_PIPELINE_PATTERN = r"^\d{12}-customizations-pipeline$"
 
 def canonical_action(name: str) -> str:
     """Normalise an artifact or action name to the source action name."""
-    return name[len(_ARTIFACT_PREFIX) :] if name.startswith(_ARTIFACT_PREFIX) else name
+    return name.removeprefix(_ARTIFACT_PREFIX)
 
 
 def short(revision: str | None) -> str:

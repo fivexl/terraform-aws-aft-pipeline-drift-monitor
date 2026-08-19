@@ -1,0 +1,25 @@
+# Pinned lint configuration.
+#
+# CI installs the latest ruff (`pip install ruff`), and ruff expands its default
+# rule set between releases - so an unpinned selection means CI can fail on rules
+# the local run never checked. Selecting explicitly keeps the two in agreement.
+
+target-version = "py313"
+line-length = 100
+
+[lint]
+select = [
+  "E4",   # pycodestyle: imports
+  "E7",   # pycodestyle: statements
+  "E9",   # pycodestyle: runtime errors
+  "F",    # pyflakes
+  "I",    # isort
+  "N",    # pep8-naming
+  "UP",   # pyupgrade
+  "B",    # flake8-bugbear
+  "ARG",  # unused arguments
+  "BLE",  # blind except
+  "ISC",  # implicit string concatenation
+  "FURB", # refurb
+  "RUF",  # ruff-specific rules, including RUF100 (unused noqa)
+]

@@ -58,7 +58,46 @@ resource "aws_iam_role_policy" "eventbridge_pipeline" {
 # Straight to SNS with an input transformer: a Lambda would add nothing but
 # a cold start. Covers every failure, including runs this module did not
 # start and the probe pipeline's own failures.
+#
+# The target carries a role_arn. For an SNS target EventBridge accepts either
+# an execution role or the topic's resource policy, but the resource-policy
+# path authenticates as the events.amazonaws.com service principal and only
+# works for a topic in this account - a cross-account topic is rejected at
+# PutTargets with "RoleArn is required for target". Publishing as a role works
+# for both, so the module always uses one.
+# https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-use-resource-based.html
 ########################################################################
+
+resource "aws_iam_role" "eventbridge_sns" {
+  name               = "${var.name_prefix}-eventbridge-sns"
+  description        = "Lets EventBridge publish AFT pipeline failure notifications to SNS"
+  assume_role_policy = data.aws_iam_policy_document.eventbridge_pipeline_assume.json
+  tags               = var.tags
+}
+
+data "aws_iam_policy_document" "eventbridge_sns" {
+  statement {
+    sid       = "PublishFailureNotifications"
+    actions   = ["sns:Publish"]
+    resources = [local.sns_topic_arn]
+  }
+
+  statement {
+    sid = "UseEncryptionKey"
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext",
+    ]
+    resources = [local.kms_key_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "eventbridge_sns" {
+  name   = "${var.name_prefix}-publish-failure-notifications"
+  role   = aws_iam_role.eventbridge_sns.id
+  policy = data.aws_iam_policy_document.eventbridge_sns.json
+}
 
 resource "aws_cloudwatch_event_rule" "pipeline_failed" {
   name        = "${var.name_prefix}-pipeline-failed"
@@ -82,6 +121,7 @@ resource "aws_cloudwatch_event_target" "pipeline_failed" {
   rule      = aws_cloudwatch_event_rule.pipeline_failed.name
   target_id = "sns"
   arn       = local.sns_topic_arn
+  role_arn  = aws_iam_role.eventbridge_sns.arn
 
   input_transformer {
     input_paths = {

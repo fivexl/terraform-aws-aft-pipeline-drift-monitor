@@ -85,7 +85,7 @@ variable "create_sns_topic" {
 }
 
 variable "sns_topic_arn" {
-  description = "ARN of an existing SNS topic to publish to. Takes precedence over create_sns_topic. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms_key_arn so the Lambdas can publish to it."
+  description = "ARN of an existing SNS topic to publish to, in this account or another. Takes precedence over create_sns_topic. The topic policy must allow sns:Publish to this account or to the specific principals: the three Lambda roles and the pipeline_failed_target_role_arn output. An encrypted topic in another account is not supported - see the README."
   type        = string
   default     = ""
 }

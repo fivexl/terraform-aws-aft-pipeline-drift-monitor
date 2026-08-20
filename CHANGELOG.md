@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `detect_changes` (default `true`) so the probe pipeline also runs on every push
   to a customizations repository, not only on the daily schedule.
 - `notify_on_drift` (default `true`) to control the per-check SNS summary.
+- The pipeline-failure EventBridge target publishes through an IAM role
+  (`pipeline_failed_target_role_arn`), so `sns_topic_arn` may name a topic in
+  another account. The roleless path authenticates as the
+  `events.amazonaws.com` service principal, which AWS only accepts for a topic
+  in the same account as the rule.
 
 ### Notes
 

@@ -1,19 +1,12 @@
 # terraform-docs output is version-sensitive: the table separator style changed
-# between v0.20 and v0.24. CI runs terraform-docs/gh-actions@v1.4.1, which ships
-# terraform-docs v0.20.0, so generate with that version locally too:
-#   docker run --rm -v "$PWD":/src -w /src \
-#     quay.io/terraform-docs/terraform-docs:0.20.0 \
-#     markdown table --config .terraform-docs.yml --output-mode inject \
-#     --output-file README.md .
+# between v0.20 and v0.24, so an unpinned local binary rewrites what CI then
+# rejects. CI runs terraform-docs/gh-actions@v1.4.1, which ships terraform-docs
+# v0.20.0; the hook below runs that exact image, so local and CI cannot drift.
+# Requires Docker.
 repos:
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.104.0
     hooks:
-      - id: terraform_docs
-        args:
-          - --hook-config=--path-to-file=README.md
-          - --hook-config=--add-to-existing-file=true
-          - --hook-config=--create-file-if-not-exist=false
       - id: terraform_fmt
       - id: terraform_validate
         # examples/ references the published registry module, which does not
@@ -24,3 +17,17 @@ repos:
     rev: v0.14.5
     hooks:
       - id: ruff-check
+  - repo: local
+    hooks:
+      - id: terraform-docs-root
+        name: terraform-docs (root, pinned to the version CI runs)
+        language: docker_image
+        entry: quay.io/terraform-docs/terraform-docs:0.20.0 markdown table --config .terraform-docs.yml --output-mode inject --output-file README.md .
+        files: ^[^/]+\.tf$
+        pass_filenames: false
+      - id: terraform-docs-example
+        name: terraform-docs (examples/basic, pinned to the version CI runs)
+        language: docker_image
+        entry: quay.io/terraform-docs/terraform-docs:0.20.0 markdown table --config .terraform-docs.yml --output-mode inject --output-file README.md examples/basic
+        files: ^examples/basic/.*\.tf$
+        pass_filenames: false

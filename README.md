@@ -219,14 +219,14 @@ week (several CodeBuild actions each).
 ## Requirements
 
 | Name | Version |
-| ---- | ------- |
+|------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
 
 ## Modules
 
 | Name | Source | Version |
-| ---- | ------ | ------- |
+|------|--------|---------|
 | <a name="module_drift_detector"></a> [drift\_detector](#module\_drift\_detector) | terraform-aws-modules/lambda/aws | 8.2.1 |
 | <a name="module_full_run"></a> [full\_run](#module\_full\_run) | terraform-aws-modules/lambda/aws | 8.2.1 |
 | <a name="module_status_report"></a> [status\_report](#module\_status\_report) | terraform-aws-modules/lambda/aws | 8.2.1 |
@@ -234,7 +234,7 @@ week (several CodeBuild actions each).
 ## Resources
 
 | Name | Type |
-| ---- | ---- |
+|------|------|
 | [aws_cloudwatch_event_rule.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
@@ -279,7 +279,7 @@ week (several CodeBuild actions each).
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-| ---- | ----------- | ---- | ------- | :------: |
+|------|-------------|------|---------|:--------:|
 | <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
 | <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. Non-current versions expire one day later, so total retention is this plus one. | `number` | `7` | no |
 | <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn. | `bool` | `true` | no |
@@ -308,7 +308,7 @@ week (several CodeBuild actions each).
 ## Outputs
 
 | Name | Description |
-| ---- | ----------- |
+|------|-------------|
 | <a name="output_artifact_bucket_name"></a> [artifact\_bucket\_name](#output\_artifact\_bucket\_name) | Name of the S3 bucket holding the revision probe pipeline's artifacts. |
 | <a name="output_daily_drift_check_rule_name"></a> [daily\_drift\_check\_rule\_name](#output\_daily\_drift\_check\_rule\_name) | Name of the EventBridge rule that runs the daily drift check. |
 | <a name="output_drift_detector_function_arn"></a> [drift\_detector\_function\_arn](#output\_drift\_detector\_function\_arn) | ARN of the drift detector Lambda function. |

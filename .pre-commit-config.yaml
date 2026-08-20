@@ -1,3 +1,10 @@
+# terraform-docs output is version-sensitive: the table separator style changed
+# between v0.20 and v0.24. CI runs terraform-docs/gh-actions@v1.4.1, which ships
+# terraform-docs v0.20.0, so generate with that version locally too:
+#   docker run --rm -v "$PWD":/src -w /src \
+#     quay.io/terraform-docs/terraform-docs:0.20.0 \
+#     markdown table --config .terraform-docs.yml --output-mode inject \
+#     --output-file README.md .
 repos:
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.104.0

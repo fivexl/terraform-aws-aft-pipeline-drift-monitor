@@ -14,6 +14,11 @@ resource "aws_codepipeline" "revision_probe" {
   role_arn      = aws_iam_role.probe_pipeline.arn
   pipeline_type = "V2"
 
+  # Stage locking serialises the Detect-Drift invocations, so two probe runs can
+  # never both call StartPipelineExecution on the same AFT pipeline. PARALLEL or
+  # QUEUED would remove that mutex.
+  execution_mode = "SUPERSEDED"
+
   artifact_store {
     location = aws_s3_bucket.artifacts.id
     type     = "S3"
@@ -94,6 +99,7 @@ data "aws_iam_policy_document" "probe_pipeline" {
   statement {
     sid = "ArtifactBucket"
     actions = [
+      "s3:GetBucketAcl",
       "s3:GetBucketLocation",
       "s3:GetBucketVersioning",
     ]
@@ -109,6 +115,7 @@ data "aws_iam_policy_document" "probe_pipeline" {
       "s3:GetObject",
       "s3:GetObjectVersion",
       "s3:PutObject",
+      "s3:PutObjectAcl",
     ]
     resources = ["${aws_s3_bucket.artifacts.arn}/*"]
   }
@@ -140,12 +147,8 @@ data "aws_iam_policy_document" "probe_pipeline" {
     sid = "UseEncryptionKey"
     actions = [
       "kms:Decrypt",
-      "kms:DescribeKey",
       "kms:Encrypt",
       "kms:GenerateDataKey",
-      "kms:GenerateDataKeyWithoutPlaintext",
-      "kms:ReEncryptFrom",
-      "kms:ReEncryptTo",
     ]
     resources = [local.kms_key_arn]
   }
@@ -202,6 +205,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
 resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
   bucket = aws_s3_bucket.artifacts.id
 
+  depends_on = [aws_s3_bucket_versioning.artifacts]
+
   rule {
     id     = "expire-probe-artifacts"
     status = "Enabled"
@@ -212,8 +217,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
       days = var.artifact_retention_days
     }
 
+    # Counts from the day the expiration action made the version noncurrent, so
+    # keep it at 1 - otherwise total retention is artifact_retention_days * 2.
     noncurrent_version_expiration {
-      noncurrent_days = var.artifact_retention_days
+      noncurrent_days = 1
     }
 
     abort_incomplete_multipart_upload {

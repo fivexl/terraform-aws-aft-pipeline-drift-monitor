@@ -16,17 +16,21 @@ def wire_clients(monkeypatch, cp, sns):
 def test_report_buckets_pipelines_by_outcome(sns):
     report = status_report.lambda_handler({}, None)
 
-    assert report["total"] == 4
-    assert [s["pipeline"] for s in report["failed"]] == ["444444444444-customizations-pipeline"]
+    assert report["total"] == 5
+    assert [s["pipeline"] for s in report["failed"]] == [
+        "444444444444-customizations-pipeline",
+        "555555555555-customizations-pipeline",
+    ]
     assert [s["pipeline"] for s in report["running"]] == ["333333333333-customizations-pipeline"]
     # The running pipeline is excluded from "behind HEAD": it is being fixed already.
     assert [s["pipeline"] for s in report["drifted"]] == [
         "222222222222-customizations-pipeline",
         "444444444444-customizations-pipeline",
+        "555555555555-customizations-pipeline",
     ]
 
     message = sns.messages[0]
-    assert message["subject"] == "AFT pipeline report: 1 failed, 2 behind HEAD"
+    assert message["subject"] == "AFT pipeline report: 2 failed, 3 behind HEAD"
     assert "Still running: 1" in message["message"]
 
 
@@ -40,7 +44,7 @@ def test_all_clear_subject(cp, sns):
 
     assert report["failed"] == []
     assert report["drifted"] == []
-    assert sns.messages[0]["subject"] == "AFT pipeline report: all 4 pipelines current"
+    assert sns.messages[0]["subject"] == "AFT pipeline report: all 5 pipelines current"
 
 
 def test_report_survives_a_probe_that_never_ran(cp, sns):
@@ -49,6 +53,8 @@ def test_report_survives_a_probe_that_never_ran(cp, sns):
     report = status_report.lambda_handler({}, None)
 
     assert report["head_revisions"] == {}
-    # With no HEAD to compare against, nothing is reported as drifted.
+    # With no HEAD to compare against, nothing is reported as drifted - so the
+    # subject must not claim everything is current.
     assert report["drifted"] == []
+    assert sns.messages[0]["subject"] == "AFT pipeline report: HEAD unavailable, 2 failed"
     assert "HEAD revisions: unavailable" in sns.messages[0]["message"]

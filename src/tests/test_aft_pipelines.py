@@ -18,6 +18,7 @@ def test_list_aft_pipelines_matches_account_pipelines_only(cp):
         "222222222222-customizations-pipeline",
         "333333333333-customizations-pipeline",
         "444444444444-customizations-pipeline",
+        "555555555555-customizations-pipeline",
     ]
     assert PROBE not in names
     assert "aft-account-request" not in names
@@ -68,9 +69,18 @@ def test_pipeline_status_judges_drift_against_last_success(cp):
     assert running["drifted"] is True
     assert running["active"] is True
 
-    never = aft_pipelines.pipeline_status(cp, "444444444444-customizations-pipeline", head)
-    assert never["drifted"] is True
-    assert never["status"] == "Failed"
+    # Failed having already run HEAD: drifted, but a restart cannot help.
+    on_head = aft_pipelines.pipeline_status(cp, "444444444444-customizations-pipeline", head)
+    assert on_head["drifted"] is True
+    assert on_head["status"] == "Failed"
+    assert on_head["no_success_found"] is True
+    assert on_head["failed_on_head"] is True
+
+    # Failed on an older commit: worth another run.
+    behind = aft_pipelines.pipeline_status(cp, "555555555555-customizations-pipeline", head)
+    assert behind["drifted"] is True
+    assert behind["no_success_found"] is True
+    assert behind["failed_on_head"] is False
 
 
 def test_publish_is_a_noop_without_a_topic(sns):

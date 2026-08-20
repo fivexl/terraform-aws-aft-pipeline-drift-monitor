@@ -27,6 +27,12 @@ data "aws_iam_policy_document" "kms" {
     }
   }
 
+  # Deliberately unconditioned. The SNS developer guide is explicit: "Adding the
+  # aws:SourceAccount, aws:SourceArn, and aws:SourceOrgID to a AWS KMS policy is
+  # not supported for EventBridge-to-encrypted topics." EventBridge's call
+  # carries none of that context, so any such condition denies the request and
+  # every failure notification is dropped with no visible error.
+  # https://docs.aws.amazon.com/sns/latest/dg/sns-key-management.html
   statement {
     sid = "AllowEventBridgeToPublishEncryptedNotifications"
     actions = [
@@ -39,12 +45,6 @@ data "aws_iam_policy_document" "kms" {
     principals {
       type        = "Service"
       identifiers = ["events.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
     }
   }
 }

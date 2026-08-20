@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -27,11 +27,14 @@ OLD_GLOBAL = "9999999999999999999999999999999999999999"
 
 
 def summary(status: str, global_rev: str, account_rev: str, minutes_ago: int = 0) -> dict:
-    """Build a pipelineExecutionSummary as CodePipeline returns it."""
+    """Build a pipelineExecutionSummary as CodePipeline returns it.
+
+    ``minutes_ago`` really moves ``startTime``, so ordering by recency is testable.
+    """
     return {
         "pipelineExecutionId": f"exec-{status}-{minutes_ago}",
         "status": status,
-        "startTime": datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+        "startTime": datetime(2026, 8, 18, 12, 0, tzinfo=UTC) - timedelta(minutes=minutes_ago),
         "sourceRevisions": [
             {"actionName": GLOBAL, "revisionId": global_rev},
             {"actionName": ACCOUNT, "revisionId": account_rev},
@@ -49,6 +52,10 @@ class FakeCodePipeline:
         #: Set to mimic an in-progress execution that has not recorded its
         #: artifact revisions yet.
         self.hide_artifact_revisions = False
+        #: Pipeline names whose start_pipeline_execution should raise.
+        self.start_errors: set[str] = set()
+        #: Set to make the job-result calls raise.
+        self.job_result_errors = False
 
     # -- discovery ---------------------------------------------------------
     def get_paginator(self, operation: str):
@@ -82,14 +89,22 @@ class FakeCodePipeline:
         raise AssertionError(f"unknown execution {pipelineExecutionId}")
 
     def start_pipeline_execution(self, name: str):
+        if name in self.start_errors:
+            raise RuntimeError(f"PipelineNotFoundException: {name}")
         self.started.append(name)
         return {"pipelineExecutionId": f"new-exec-{name}"}
 
     # -- job protocol ------------------------------------------------------
     def put_job_success_result(self, jobId: str):  # noqa: N803
+        if self.job_result_errors:
+            raise RuntimeError("InvalidJobStateException")
         self.job_results.append((jobId, "success"))
 
-    def put_job_failure_result(self, jobId: str, failureDetails: dict):  # noqa: ARG002, N803
+    def put_job_failure_result(self, jobId: str, failureDetails: dict):  # noqa: N803
+        if self.job_result_errors:
+            raise RuntimeError("InvalidJobStateException")
+        # The API rejects an empty message, so record it and let tests assert on it.
+        assert failureDetails["message"], "failureDetails.message must be 1-5000 characters"
         self.job_results.append((jobId, "failure"))
 
 
@@ -98,23 +113,43 @@ class FakeSns:
 
     def __init__(self):
         self.messages: list[dict] = []
+        #: Set to make publish raise, as a KMS denial or throttle would.
+        self.fail = False
 
     def publish(self, TopicArn: str, Subject: str, Message: str):  # noqa: N803
+        if self.fail:
+            raise RuntimeError("KMSAccessDeniedException")
         self.messages.append({"topic": TopicArn, "subject": Subject, "message": Message})
 
 
 @pytest.fixture
 def pipelines() -> dict[str, list[dict]]:
-    """Probe at HEAD, one current account pipeline, one stale, one running, one new."""
+    """One pipeline per case the drift detector has to distinguish.
+
+    * ``111...`` current at HEAD - left alone
+    * ``222...`` last success on an older commit - started
+    * ``333...`` stale but an execution is in flight - skipped
+    * ``444...`` newest execution already ran HEAD and failed - reported, not restarted
+    * ``555...`` failed on an older commit, never succeeded - started
+    """
     return {
         PROBE: [summary("Succeeded", HEAD_GLOBAL, HEAD_ACCOUNT)],
-        "111111111111-customizations-pipeline": [summary("Succeeded", HEAD_GLOBAL, HEAD_ACCOUNT)],
-        "222222222222-customizations-pipeline": [summary("Succeeded", OLD_GLOBAL, HEAD_ACCOUNT)],
+        "111111111111-customizations-pipeline": [
+            summary("Succeeded", HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=10)
+        ],
+        "222222222222-customizations-pipeline": [
+            summary("Succeeded", OLD_GLOBAL, HEAD_ACCOUNT, minutes_ago=30)
+        ],
         "333333333333-customizations-pipeline": [
-            summary("InProgress", HEAD_GLOBAL, HEAD_ACCOUNT),
+            summary("InProgress", HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=1),
             summary("Succeeded", OLD_GLOBAL, HEAD_ACCOUNT, minutes_ago=60),
         ],
-        "444444444444-customizations-pipeline": [summary("Failed", HEAD_GLOBAL, HEAD_ACCOUNT)],
+        "444444444444-customizations-pipeline": [
+            summary("Failed", HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=20)
+        ],
+        "555555555555-customizations-pipeline": [
+            summary("Failed", OLD_GLOBAL, HEAD_ACCOUNT, minutes_ago=40)
+        ],
         "aft-account-request": [summary("Succeeded", HEAD_GLOBAL, HEAD_ACCOUNT)],
     }
 

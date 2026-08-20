@@ -4,7 +4,7 @@
 # rule set between releases - so an unpinned selection means CI can fail on rules
 # the local run never checked. Selecting explicitly keeps the two in agreement.
 
-target-version = "py313"
+target-version = "py314"
 line-length = 100
 
 [lint]

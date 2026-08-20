@@ -63,6 +63,11 @@ output "status_report_rule_name" {
   value       = aws_cloudwatch_event_rule.status_report.name
 }
 
+output "pipeline_failed_target_role_arn" {
+  description = "Role EventBridge assumes to publish failure notifications. A topic in another account must allow this role (or this account) to sns:Publish."
+  value       = aws_iam_role.eventbridge_sns.arn
+}
+
 output "pipeline_failed_rule_name" {
   description = "Name of the EventBridge rule that forwards pipeline failures to SNS."
   value       = aws_cloudwatch_event_rule.pipeline_failed.name

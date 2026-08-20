@@ -56,7 +56,7 @@ Four signals, one SNS topic:
 | Signal | Source | When |
 |---|---|---|
 | Drift summary | `drift-detector` Lambda | Each drift check with something to report: stale, failing-on-HEAD or unstartable pipelines |
-| Failure alert | EventBridge → SNS directly | Any pipeline ending in `failure_pipeline_name_suffix` fails, plus the revision probe itself |
+| Failure alert | EventBridge → SNS directly, via an IAM role | Any pipeline ending in `failure_pipeline_name_suffix` fails, plus the revision probe itself |
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
 | Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
 
@@ -176,6 +176,36 @@ publishing; a condition that is never populated denies the call and drops every
 failure alert with no visible error. That is why this module's own key and topic
 policies carry no condition on `events.amazonaws.com`.
 
+### A topic in another account
+
+Supported. The failure-notification target publishes through an IAM role rather
+than as the `events.amazonaws.com` service principal, because the roleless path
+only works for a topic in the same account as the rule — EventBridge rejects a
+cross-account SNS target outright with `RoleArn is required for target`.
+
+Grant `sns:Publish` on the foreign topic to this account, which covers every
+publisher through their identity policies:
+
+```json
+{
+  "Sid": "AllowAftDriftMonitor",
+  "Effect": "Allow",
+  "Principal": { "AWS": "arn:aws:iam::<aft-account-id>:root" },
+  "Action": "sns:Publish",
+  "Resource": "arn:aws:sns:<region>:<topic-account-id>:<topic-name>"
+}
+```
+
+To name principals individually instead, they are the three Lambda execution
+roles and the `pipeline_failed_target_role_arn` output.
+
+One limitation: a cross-account topic that is **encrypted with a CMK** is not
+supported. Every publisher would need `kms:GenerateDataKey*` and `kms:Decrypt` on
+that foreign key, and `kms_key_arn` cannot be repurposed for it because the same
+key also encrypts the probe pipeline's S3 artifact bucket — pointing the artifact
+store at a key in another account is not a trade this module makes for you. Use an
+unencrypted cross-account topic, or a topic in this account that forwards to it.
+
 Trigger a check on demand — `terraform output` only sees outputs the calling
 root module re-exports, so see `examples/basic/outputs.tf` for the three worth
 forwarding:
@@ -245,8 +275,10 @@ week (several CodeBuild actions each).
 | [aws_cloudwatch_event_target.weekly_full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_codepipeline.revision_probe](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/codepipeline) | resource |
 | [aws_iam_role.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role.eventbridge_sns](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role_policy.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_iam_role_policy.eventbridge_sns](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_kms_alias.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_alias) | resource |
 | [aws_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
@@ -263,6 +295,7 @@ week (several CodeBuild actions each).
 | [aws_iam_policy_document.drift_detector](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.eventbridge_sns](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.kms](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
@@ -301,7 +334,7 @@ week (several CodeBuild actions each).
 | <a name="input_python_runtime"></a> [python\_runtime](#input\_python\_runtime) | Lambda Python runtime. | `string` | `"python3.14"` | no |
 | <a name="input_report_schedule_expression"></a> [report\_schedule\_expression](#input\_report\_schedule\_expression) | Schedule for the status report. Set it a few hours after schedule\_expression so the pipelines started by the drift check have finished. | `string` | `"cron(0 8 * * ? *)"` | no |
 | <a name="input_schedule_expression"></a> [schedule\_expression](#input\_schedule\_expression) | Schedule for the daily drift check. Starts the revision probe pipeline, which resolves HEAD through the AFT CodeConnections connection and then invokes the drift detector. | `string` | `"cron(0 2 * * ? *)"` | no |
-| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to. Takes precedence over create\_sns\_topic. When supplying your own topic, its resource policy must allow events.amazonaws.com to publish, and if it is encrypted you must pass the same key as kms\_key\_arn so the Lambdas can publish to it. | `string` | `""` | no |
+| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to, in this account or another. Takes precedence over create\_sns\_topic. The topic policy must allow sns:Publish to this account or to the specific principals: the three Lambda roles and the pipeline\_failed\_target\_role\_arn output. An encrypted topic in another account is not supported - see the README. | `string` | `""` | no |
 | <a name="input_status_report_timeout"></a> [status\_report\_timeout](#input\_status\_report\_timeout) | Timeout in seconds for the status report Lambda. | `number` | `300` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every resource that supports them. | `map(string)` | `{}` | no |
 
@@ -316,6 +349,7 @@ week (several CodeBuild actions each).
 | <a name="output_full_run_function_arn"></a> [full\_run\_function\_arn](#output\_full\_run\_function\_arn) | ARN of the weekly full run Lambda function. |
 | <a name="output_full_run_function_name"></a> [full\_run\_function\_name](#output\_full\_run\_function\_name) | Name of the weekly full run Lambda function. |
 | <a name="output_pipeline_failed_rule_name"></a> [pipeline\_failed\_rule\_name](#output\_pipeline\_failed\_rule\_name) | Name of the EventBridge rule that forwards pipeline failures to SNS. |
+| <a name="output_pipeline_failed_target_role_arn"></a> [pipeline\_failed\_target\_role\_arn](#output\_pipeline\_failed\_target\_role\_arn) | Role EventBridge assumes to publish failure notifications. A topic in another account must allow this role (or this account) to sns:Publish. |
 | <a name="output_revision_probe_pipeline_arn"></a> [revision\_probe\_pipeline\_arn](#output\_revision\_probe\_pipeline\_arn) | ARN of the revision probe pipeline. |
 | <a name="output_revision_probe_pipeline_name"></a> [revision\_probe\_pipeline\_name](#output\_revision\_probe\_pipeline\_name) | Name of the pipeline that resolves HEAD of the customizations repositories through the AFT CodeConnections connection. |
 | <a name="output_sns_topic_arn"></a> [sns\_topic\_arn](#output\_sns\_topic\_arn) | ARN of the topic every notification is published to - either the one supplied by the caller or the one this module created. |

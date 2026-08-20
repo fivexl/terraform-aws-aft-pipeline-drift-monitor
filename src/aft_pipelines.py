@@ -29,7 +29,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: Output artifact names carry a ``source-`` prefix while action names do not.
+#: AFT's own pipelines prefix output artifact names with ``source-``; the probe
+#: pipeline this module creates does not. Normalising both keeps the keys
+#: comparable across the two.
 _ARTIFACT_PREFIX = "source-"
 
 SUCCEEDED = "Succeeded"
@@ -112,6 +114,11 @@ def head_revisions(client: Any, probe_pipeline: str, execution_id: str | None = 
     for summary in executions(client, probe_pipeline, limit=5):
         revisions = revisions_from_summary(summary)
         if revisions:
+            logger.info(
+                "Resolved HEAD from probe execution %s started %s",
+                summary.get("pipelineExecutionId"),
+                _isoformat(summary.get("startTime")),
+            )
             return revisions
     return {}
 
@@ -127,24 +134,44 @@ def _execution_revisions(client: Any, pipeline: str, execution_id: str) -> dict[
     }
 
 
+def drifted_against(revisions: dict[str, str], head: dict[str, str]) -> bool:
+    """Whether ``revisions`` differs from ``head`` on any tracked action."""
+    return any(revisions.get(action) != revision for action, revision in head.items())
+
+
 def pipeline_status(client: Any, pipeline: str, head: dict[str, str]) -> dict[str, Any]:
     """Summarise one pipeline: latest state, applied commits and drift.
 
     ``drifted`` is judged against the last *successful* execution, because that
-    is the commit the account is actually running. A pipeline that has never
-    succeeded is drifted by definition.
+    is the commit the account is actually running. A pipeline with no success
+    among the executions inspected is drifted by definition; ``no_success_found``
+    distinguishes that case, and ``failed_on_head`` marks the pipelines whose
+    newest attempt already ran HEAD and failed, which a restart cannot fix.
     """
     summaries = executions(client, pipeline)
     latest = summaries[0] if summaries else None
     succeeded = next((s for s in summaries if s.get("status") == SUCCEEDED), None)
     applied = revisions_from_summary(succeeded) if succeeded else {}
-    drifted = any(applied.get(action) != revision for action, revision in head.items())
+    attempted = revisions_from_summary(latest) if latest else {}
+    drifted = drifted_against(applied, head)
+    latest_status = latest.get("status") if latest else "NeverExecuted"
     return {
         "pipeline": pipeline,
-        "status": latest.get("status") if latest else "NeverExecuted",
+        "status": latest_status,
         "last_execution_at": _isoformat(latest.get("startTime")) if latest else None,
         "applied_revisions": applied,
         "drifted": drifted,
+        # No success within the window this inspects - distinct from drift
+        # against a known older commit, and not fixable by another run.
+        "no_success_found": succeeded is None,
+        # The most recent attempt already carried HEAD and did not succeed, so
+        # restarting it would only repeat the same failure.
+        "failed_on_head": (
+            bool(head)
+            and not drifted_against(attempted, head)
+            and latest_status not in ACTIVE_STATES
+            and latest_status != SUCCEEDED
+        ),
         "active": bool(latest and latest.get("status") in ACTIVE_STATES),
     }
 
@@ -155,24 +182,32 @@ def _isoformat(value: Any) -> str | None:
 
 def start_pipelines(
     client: Any, statuses: list[dict[str, Any]], max_runs: int, dry_run: bool = False
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Start up to ``max_runs`` pipelines, returning ``(started, deferred)``.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Start up to ``max_runs`` pipelines, returning ``(started, deferred, failed)``.
 
     Deferring rather than starting everything keeps CodeBuild concurrency and
-    per-account Terraform state contention bounded.
+    per-account Terraform state contention bounded. A pipeline that cannot be
+    started is recorded and skipped, never allowed to abort the remaining ones.
     """
     selected, deferred = statuses[:max_runs], statuses[max_runs:]
     started: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
     for status in selected:
         name = status["pipeline"]
         if dry_run:
             logger.info("DRY_RUN: would start %s", name)
             continue
-        execution = client.start_pipeline_execution(name=name)
+        try:
+            execution = client.start_pipeline_execution(name=name)
+        except Exception as exc:  # one deleted or conflicted pipeline must not abort the rest
+            logger.exception("Could not start %s", name)
+            status["start_error"] = str(exc)
+            failed.append(status)
+            continue
         status["triggered_execution_id"] = execution.get("pipelineExecutionId")
         started.append(status)
         logger.info("Started %s (execution %s)", name, status["triggered_execution_id"])
-    return started, deferred
+    return started, deferred, failed
 
 
 def publish(client: Any, topic_arn: str, subject: str, message: str) -> None:

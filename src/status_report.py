@@ -69,6 +69,9 @@ def build_report() -> dict:
 
 def _subject(report: dict) -> str:
     failed, drifted = len(report["failed"]), len(report["drifted"])
+    if not report["head_revisions"]:
+        # Without HEAD nothing can be judged as current, so never say it is.
+        return f"AFT pipeline report: HEAD unavailable, {failed} failed"
     if failed or drifted:
         return f"AFT pipeline report: {failed} failed, {drifted} behind HEAD"
     return f"AFT pipeline report: all {report['total']} pipelines current"

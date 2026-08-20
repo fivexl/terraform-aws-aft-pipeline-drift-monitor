@@ -1,0 +1,14 @@
+# The Providers table reports versions resolved from .terraform.lock.hcl, which a
+# module deliberately does not commit. That made the generated README depend on
+# whether the person running terraform-docs happened to have a local lock file,
+# so the table churned between contributors and CI. Requirements already states
+# the constraint, which is the part a consumer needs.
+formatter: markdown table
+
+sections:
+  hide:
+    - providers
+
+output:
+  file: README.md
+  mode: inject

@@ -6,8 +6,13 @@ periodic baseline apply: it re-applies the customizations to every account, so
 manual console changes, out-of-band edits and anything else that has drifted in
 the *account* (rather than in the repository) gets corrected too.
 
-Pipelines with an execution already in flight are skipped, because starting one
-supersedes the running execution and would abort a half-applied Terraform run.
+Pipelines with an execution already in flight are skipped: the pipelines run in
+SUPERSEDED mode, so a new execution would queue behind the running one and then
+supersede it, which achieves nothing that the in-flight run is not already doing.
+
+When more pipelines are eligible than MAX_PIPELINES_PER_RUN allows, the ones
+whose last execution is oldest go first. Selecting by name instead would start
+the same lexicographically-first accounts every week and never reach the tail.
 """
 
 from __future__ import annotations
@@ -38,8 +43,14 @@ sns = boto3.client("sns")
 def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
     """Entry point. Starts every idle AFT customizations pipeline."""
     summary = run_all()
-    publish(sns, os.environ.get("SNS_TOPIC_ARN", ""), _subject(summary), _format_message(summary))
     logger.info("Full run summary: %s", json.dumps(summary, default=str))
+    # A notification failure must not mask a run that started pipelines.
+    try:
+        publish(
+            sns, os.environ.get("SNS_TOPIC_ARN", ""), _subject(summary), _format_message(summary)
+        )
+    except Exception:
+        logger.exception("Could not publish the full run summary")
     return summary
 
 
@@ -55,16 +66,22 @@ def run_all() -> dict:
     # No HEAD comparison: an empty head means pipeline_status reports state and
     # liveness only, which is all this Lambda needs.
     statuses = [pipeline_status(codepipeline, name, {}) for name in pipelines]
-    eligible = [s for s in statuses if not s["active"]]
     skipped = [s for s in statuses if s["active"]]
+    # Oldest last execution first, so a cap below the account count rotates
+    # through every account over successive runs instead of starving the tail.
+    eligible = sorted(
+        (s for s in statuses if not s["active"]),
+        key=lambda s: (s["last_execution_at"] or "", s["pipeline"]),
+    )
 
-    started, deferred = start_pipelines(codepipeline, eligible, max_runs, dry_run)
+    started, deferred, failed_to_start = start_pipelines(codepipeline, eligible, max_runs, dry_run)
 
     return {
         "pipelines_found": len(pipelines),
         "started": [s["pipeline"] for s in started],
         "skipped_already_running": [s["pipeline"] for s in skipped],
         "deferred_over_limit": [s["pipeline"] for s in deferred],
+        "failed_to_start": [s["pipeline"] for s in failed_to_start],
         "dry_run": dry_run,
         "eligible": [s["pipeline"] for s in eligible],
     }
@@ -89,6 +106,7 @@ def _format_message(summary: dict) -> str:
         ("Started", "started"),
         ("Skipped, already running", "skipped_already_running"),
         ("Deferred to the next run (MAX_PIPELINES_PER_RUN reached)", "deferred_over_limit"),
+        ("Could not be started", "failed_to_start"),
     ):
         if summary[key]:
             lines += ["", f"{label}:", *[f"  {name}" for name in summary[key]]]

@@ -20,3 +20,30 @@ jobs:
     with:
       terraform-version: "1.9.0"
       aws-default-region: "eu-central-1"
+
+  # The reusable workflow's fmt and validate jobs run inside
+  # hashicorp/terraform:latest and ignore its terraform-version input, so the
+  # required_version floor declared in versions.tf is validated by nothing.
+  # This job is what actually holds us to it.
+  minimum-terraform:
+    name: validate on the declared minimum Terraform
+    runs-on: ubuntu-latest
+    container:
+      image: hashicorp/terraform:1.9.0
+    steps:
+      - uses: actions/checkout@v4
+      - run: terraform init -backend=false
+      - run: terraform validate -no-color
+
+  # The reusable workflow has its terraform-docs job commented out, so README
+  # staleness is otherwise caught only for contributors who installed pre-commit.
+  terraform-docs:
+    name: terraform-docs is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-docs/gh-actions@v1.4.1
+        with:
+          working-dir: .,examples/basic
+          config-file: .terraform-docs.yml
+          fail-on-diff: true

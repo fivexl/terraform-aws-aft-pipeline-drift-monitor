@@ -1,9 +1,10 @@
 ########################################################################
 # Notification topic
 #
-# Created when create_sns_topic is true and no sns_topic_arn is supplied.
-# All three signals - drift check summary, pipeline failures and the status
-# report - go to the same topic so a single subscription covers the module.
+# Created when create_sns_topic is true and no sns_topic_arn is supplied. All
+# four signals - drift check summary, pipeline failures, the status report and
+# the weekly full run - go to the same topic, so a single subscription covers
+# the whole module.
 ########################################################################
 
 resource "aws_sns_topic" "this" {
@@ -18,6 +19,10 @@ resource "aws_sns_topic" "this" {
 data "aws_iam_policy_document" "sns_topic" {
   count = local.create_sns_topic ? 1 : 0
 
+  # Unconditioned for the same reason as the KMS grant: this is the same
+  # EventBridge call path, and AWS's documented EventBridge-to-SNS statement
+  # carries no source condition. A condition that is never populated denies the
+  # publish silently, which would disable failure alerting altogether.
   statement {
     sid       = "AllowEventBridgePublish"
     actions   = ["sns:Publish"]
@@ -26,12 +31,6 @@ data "aws_iam_policy_document" "sns_topic" {
     principals {
       type        = "Service"
       identifiers = ["events.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
     }
   }
 

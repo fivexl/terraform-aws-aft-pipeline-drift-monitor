@@ -23,8 +23,9 @@ re-runs those pipelines when you push to `aft-global-customizations` or
 with until something starts it again. In a large organisation the accounts
 silently spread across many different commits.
 
-This module finds those accounts every day, re-runs them, tells you when a run
-fails, and reports the outcome a few hours later.
+This module finds those accounts every day and re-runs them, re-applies every
+account once a week to catch drift that happened inside an account, tells you
+when a run fails, and reports the outcome a few hours later.
 
 ## What it deploys
 
@@ -54,8 +55,8 @@ Four signals, one SNS topic:
 
 | Signal | Source | When |
 |---|---|---|
-| Drift summary | `drift-detector` Lambda | Each drift check that found stale pipelines |
-| Failure alert | EventBridge → SNS directly | Any AFT customizations pipeline execution fails |
+| Drift summary | `drift-detector` Lambda | Each drift check with something to report: stale, failing-on-HEAD or unstartable pipelines |
+| Failure alert | EventBridge → SNS directly | Any pipeline ending in `failure_pipeline_name_suffix` fails, plus the revision probe itself |
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
 | Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
 
@@ -71,11 +72,15 @@ both exist:
   comparison can see this. The weekly full run corrects it by re-applying the
   customizations to **every** account whether or not its commit is current.
 
-The full run skips pipelines with an execution already in flight: starting one
-supersedes the running execution, which would abort a half-applied Terraform run.
+The full run skips pipelines with an execution already in flight: those pipelines
+run in `SUPERSEDED` mode, so a second execution would queue behind the running one
+and then supersede it, achieving nothing the in-flight run is not already doing.
+
 It obeys the same `max_pipelines_per_run` cap and `dry_run` flag as the drift
-check — note that anything the cap defers waits for the *next weekly* run, so
-keep the cap at or above your account count if you want a full sweep every week.
+check, and selects **oldest last execution first** — so a cap below your account
+count rotates through every account over successive weeks instead of starting the
+same lexicographically-first accounts forever. Keep the cap at or above your
+account count if you want every account re-applied every week.
 
 ## How HEAD is resolved
 
@@ -93,6 +98,12 @@ credential, this module borrows CodePipeline's own resolution:
 3. The probe's second stage invokes the drift detector, passing the execution
    id. That commit is HEAD.
 
+If that execution has not recorded its revisions yet, the detector falls back to
+the most recent probe execution that has them (the last five are searched), so
+HEAD can briefly be a previous probe run's commit — it logs which execution it
+used. The status report always reads the latest probe execution, since it is not
+invoked from inside one.
+
 Comparing pipelines against each other instead would not work: right after a
 push *every* pipeline is behind, so the newest commit any of them has seen is
 still the old one, and nothing would ever be detected.
@@ -106,13 +117,23 @@ waiting for the next daily run.
 A pipeline is behind if its **last successful** execution used a different
 commit than HEAD, for either source action. The last successful execution is
 what the account is actually running — a later failed or cancelled attempt does
-not change that. A pipeline that has never succeeded is treated as drifted, so a
-failure is retried on the next check.
+not change that.
 
-Pipelines with an execution `InProgress` are reported but never started again.
+Only the **10 most recent executions** of each pipeline are inspected, which
+bounds the API calls per check. A pipeline with no success among those 10 counts
+as drifted, so a failure is retried on the next check. Two cases are deliberately
+*reported but not restarted*:
+
+- an execution is `InProgress` or `Stopping` — the run under way will settle it
+- the newest execution already ran HEAD and did not succeed — another run would
+  only repeat the same failure, so it is listed as *failing on HEAD* instead
+
 At most `max_pipelines_per_run` pipelines are started per check; the rest are
 deferred to the next run, which keeps CodeBuild concurrency and per-account
-Terraform state contention bounded.
+Terraform state contention bounded. Drift is judged by source **action name**, so
+if AFT ever renames or adds one the detector fails loudly rather than marking
+every account drifted — set `SOURCE_ACTIONS` is compared against what the probe
+resolved.
 
 ## Usage
 
@@ -143,16 +164,29 @@ Start with `dry_run = true` to see what would be re-run before letting it act.
 To publish to a topic you already own, set `sns_topic_arn`. It takes precedence
 over `create_sns_topic`, so nothing is created even at the default
 `create_sns_topic = true`. Its resource policy must allow `events.amazonaws.com`
-to `sns:Publish` (with an `aws:SourceAccount` condition) or the failure
-notifications are silently dropped — the module can only manage the policy of a
-topic it creates itself. Setting `create_sns_topic = false` without an
-`sns_topic_arn` fails the plan: the module has to have somewhere to publish.
+to `sns:Publish`, and if it is encrypted, pass the same key as `kms_key_arn` so
+the Lambdas can publish to it — the module can only manage the policy of a topic
+it creates itself. Setting `create_sns_topic = false` without an `sns_topic_arn`
+fails the plan: the module has to have somewhere to publish.
 
-Trigger a check on demand:
+Do **not** add an `aws:SourceAccount` / `aws:SourceArn` condition to either the
+topic policy or the key policy for the EventBridge principal. The SNS guide states
+plainly that those keys are *not supported* for EventBridge-to-encrypted-topic
+publishing; a condition that is never populated denies the call and drops every
+failure alert with no visible error. That is why this module's own key and topic
+policies carry no condition on `events.amazonaws.com`.
+
+Trigger a check on demand — `terraform output` only sees outputs the calling
+root module re-exports, so see `examples/basic/outputs.tf` for the three worth
+forwarding:
 
 ```bash
 aws codepipeline start-pipeline-execution \
   --name "$(terraform output -raw revision_probe_pipeline_name)"
+
+# ...or the weekly full run, without waiting for Monday
+aws lambda invoke \
+  --function-name "$(terraform output -raw full_run_function_name)" /dev/stdout
 ```
 
 ## Requirements and assumptions
@@ -168,13 +202,18 @@ aws codepipeline start-pipeline-execution \
 
 ## Costs
 
-One extra CodePipeline execution per check (V2 pipelines are billed per action
-run), three short Lambda invocations, and a few zipped copies of the
-customizations repositories in S3 that expire after `artifact_retention_days`.
+One probe pipeline execution per scheduled check — plus one per push while
+`detect_changes` is on — each billing three action runs (two sources and the
+Lambda invoke). One drift-detector invocation per probe run, one status report a
+day, one full run a week. A customer-managed KMS key, which is **not optional**:
+EventBridge cannot publish to a topic encrypted with `alias/aws/sns`. And a few
+zipped copies of the customizations repositories in S3, expiring after
+`artifact_retention_days` (plus one day for the non-current version).
 The re-runs themselves are AFT's normal CodeBuild cost — which you would have
 paid anyway had the pipelines been kept current. The weekly full run is the one
 deliberate extra: it re-applies every account once a week even when nothing
-changed, so budget one CodeBuild run per account per week.
+changed, so budget one full customizations pipeline execution per account per
+week (several CodeBuild actions each).
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
@@ -183,12 +222,6 @@ changed, so budget one CodeBuild run per account per week.
 | ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
-
-## Providers
-
-| Name | Version |
-| ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | 6.60.0 |
 
 ## Modules
 
@@ -248,22 +281,22 @@ changed, so budget one CodeBuild run per account per week.
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
-| <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. | `number` | `7` | no |
+| <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. Non-current versions expire one day later, so total retention is this plus one. | `number` | `7` | no |
 | <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn. | `bool` | `true` | no |
 | <a name="input_detect_changes"></a> [detect\_changes](#input\_detect\_changes) | Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook. | `bool` | `true` | no |
-| <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts. | `number` | `600` | no |
-| <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation. | `bool` | `false` | no |
-| <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix the EventBridge failure rule matches on. Must be consistent with pipeline\_name\_pattern. | `string` | `"-customizations-pipeline"` | no |
-| <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC. Set it after schedule\_expression so it does not race the daily drift check. | `string` | `"cron(0 6 ? * MON *)"` | no |
-| <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It walks every AFT pipeline's execution history before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |
+| <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It reads the last 10 executions of every AFT pipeline, so scale it with the number of vended accounts. | `number` | `600` | no |
+| <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation. | `bool` | `false` | no |
+| <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. | `string` | `"-customizations-pipeline"` | no |
+| <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report\_schedule\_expression, so Monday's report describes a full run that is still in flight. | `string` | `"cron(0 6 ? * MON *)"` | no |
+| <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key used for the SNS topic and the probe pipeline's artifacts. Leave empty to have the module create one. A supplied key must allow events.amazonaws.com to kms:Decrypt and kms:GenerateDataKey*, otherwise EventBridge cannot publish the failure notifications. | `string` | `""` | no |
 | <a name="input_kms_key_deletion_window_in_days"></a> [kms\_key\_deletion\_window\_in\_days](#input\_kms\_key\_deletion\_window\_in\_days) | Deletion window for the KMS key created by this module. | `number` | `30` | no |
-| <a name="input_lambda_memory_size"></a> [lambda\_memory\_size](#input\_lambda\_memory\_size) | Memory in MB for both Lambda functions. | `number` | `512` | no |
-| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Python log level for both Lambda functions. | `string` | `"INFO"` | no |
-| <a name="input_log_retention_in_days"></a> [log\_retention\_in\_days](#input\_log\_retention\_in\_days) | CloudWatch Logs retention for both Lambda functions. | `number` | `30` | no |
-| <a name="input_max_pipelines_per_run"></a> [max\_pipelines\_per\_run](#input\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. | `number` | `20` | no |
+| <a name="input_lambda_memory_size"></a> [lambda\_memory\_size](#input\_lambda\_memory\_size) | Memory in MB for all three Lambda functions. | `number` | `512` | no |
+| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Python log level for all three Lambda functions. | `string` | `"INFO"` | no |
+| <a name="input_log_retention_in_days"></a> [log\_retention\_in\_days](#input\_log\_retention\_in\_days) | CloudWatch Logs retention for all three Lambda functions. | `number` | `30` | no |
+| <a name="input_max_pipelines_per_run"></a> [max\_pipelines\_per\_run](#input\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single drift check or weekly full run. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. The full run selects oldest-execution-first, so a cap below your account count rotates rather than starving the same accounts. | `number` | `20` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name created by this module. | `string` | `"aft-pipeline-drift-monitor"` | no |
-| <a name="input_notify_on_drift"></a> [notify\_on\_drift](#input\_notify\_on\_drift) | Publish an SNS message listing the pipelines started by each drift check. Failures are always published, by the EventBridge failure rule. | `bool` | `true` | no |
+| <a name="input_notify_on_drift"></a> [notify\_on\_drift](#input\_notify\_on\_drift) | Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the weekly full run summary, nor the EventBridge failure alerts, which are always published. | `bool` | `true` | no |
 | <a name="input_pipeline_name_pattern"></a> [pipeline\_name\_pattern](#input\_pipeline\_name\_pattern) | Python regular expression the Lambdas use to select AFT customizations pipelines. The default matches AFT's own naming, `<account-id>-customizations-pipeline`. | `string` | `"^\\d{12}-customizations-pipeline$"` | no |
 | <a name="input_python_runtime"></a> [python\_runtime](#input\_python\_runtime) | Lambda Python runtime. | `string` | `"python3.14"` | no |
 | <a name="input_report_schedule_expression"></a> [report\_schedule\_expression](#input\_report\_schedule\_expression) | Schedule for the status report. Set it a few hours after schedule\_expression so the pipelines started by the drift check have finished. | `string` | `"cron(0 8 * * ? *)"` | no |

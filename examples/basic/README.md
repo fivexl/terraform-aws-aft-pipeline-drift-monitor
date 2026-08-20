@@ -14,8 +14,8 @@ cron.
 ## Prerequisites
 
 - Credentials for the **AFT management account**, in the **AFT home region**.
-- AFT deployed with a Git provider that uses CodeConnections (GitHub, GitLab or
-  Bitbucket). The module reads the connection ARN and the customizations
+- AFT deployed with a Git provider that uses CodeConnections (GitHub, GitHub
+  Enterprise Server, GitLab or Bitbucket). The module reads the connection ARN and the customizations
   repository names from AFT's SSM parameters, so nothing has to be passed in.
 
 ## Usage
@@ -52,12 +52,6 @@ To see what either would do before letting it start any pipeline, set
 | ---- | ------- |
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
-
-## Providers
-
-| Name | Version |
-| ---- | ------- |
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.28 |
 
 ## Modules
 

@@ -61,19 +61,27 @@ locals {
 
   # Region is wildcarded so the policies survive AFT being deployed in another
   # region; the account id keeps the scope to this account only.
+  aft_customizations_pipeline_arn = "arn:${data.aws_partition.current.partition}:codepipeline:*:${data.aws_caller_identity.current.account_id}:*${var.failure_pipeline_name_suffix}"
+  probe_pipeline_arn              = "arn:${data.aws_partition.current.partition}:codepipeline:*:${data.aws_caller_identity.current.account_id}:${local.probe_pipeline_name}"
+
   aft_pipeline_arns = [
-    "arn:${data.aws_partition.current.partition}:codepipeline:*:${data.aws_caller_identity.current.account_id}:*${var.failure_pipeline_name_suffix}",
-    "arn:${data.aws_partition.current.partition}:codepipeline:*:${data.aws_caller_identity.current.account_id}:${local.probe_pipeline_name}",
+    local.aft_customizations_pipeline_arn,
+    local.probe_pipeline_arn,
   ]
 
   lambda_source_path = [
     {
       path = "${path.module}/src"
+      # Deny everything, then re-admit only the handler modules. An exclusion
+      # list silently ships whatever the next tool drops into src/ - a lint or
+      # test cache is gitignored, so CI and a developer machine would then
+      # produce different source_code_hash values and republish the functions
+      # on alternating applies. Order matters: the last matching rule wins, so
+      # the tests exclusion has to follow the .py admission.
       patterns = [
+        "!.*",
+        ".*\\.py",
         "!tests/.*",
-        "!requirements\\.txt",
-        "!__pycache__/.*",
-        "!\\.pytest_cache/.*",
       ]
     }
   ]
@@ -128,14 +136,21 @@ data "aws_iam_policy_document" "drift_detector" {
   }
 
   statement {
-    sid = "InspectAndRunAftPipelines"
-    actions = [
-      "codepipeline:GetPipelineExecution",
-      "codepipeline:GetPipelineState",
-      "codepipeline:ListPipelineExecutions",
-      "codepipeline:StartPipelineExecution",
-    ]
+    sid       = "InspectPipelineExecutions"
+    actions   = ["codepipeline:ListPipelineExecutions"]
     resources = local.aft_pipeline_arns
+  }
+
+  statement {
+    sid       = "ResolveHeadFromProbe"
+    actions   = ["codepipeline:GetPipelineExecution"]
+    resources = [local.probe_pipeline_arn]
+  }
+
+  statement {
+    sid       = "RunAftPipelines"
+    actions   = ["codepipeline:StartPipelineExecution"]
+    resources = [local.aft_customizations_pipeline_arn]
   }
 
   statement {
@@ -212,11 +227,8 @@ data "aws_iam_policy_document" "status_report" {
   }
 
   statement {
-    sid = "InspectAftPipelines"
-    actions = [
-      "codepipeline:GetPipelineState",
-      "codepipeline:ListPipelineExecutions",
-    ]
+    sid       = "InspectAftPipelines"
+    actions   = ["codepipeline:ListPipelineExecutions"]
     resources = local.aft_pipeline_arns
   }
 
@@ -298,7 +310,7 @@ data "aws_iam_policy_document" "full_run" {
       "codepipeline:ListPipelineExecutions",
       "codepipeline:StartPipelineExecution",
     ]
-    resources = local.aft_pipeline_arns
+    resources = [local.aft_customizations_pipeline_arn]
   }
 
   statement {

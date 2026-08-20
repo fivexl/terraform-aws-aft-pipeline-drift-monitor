@@ -26,6 +26,7 @@ from aft_pipelines import (
     pipeline_status,
     publish,
     short,
+    source_actions,
     start_pipelines,
 )
 
@@ -44,24 +45,44 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
         result = detect_and_run(job)
     except Exception as exc:  # must not leave the CodePipeline job hanging
         logger.exception("Drift detection failed")
-        if job_id:
+        if job_id and _report_job(job_id, exc):
             # The pipeline goes FAILED, and the EventBridge failure rule alerts.
-            codepipeline.put_job_failure_result(
-                jobId=job_id,
-                failureDetails={"type": "JobFailed", "message": str(exc)[:265]},
-            )
             return {"error": str(exc)}
+        # No job to answer, or answering it failed: alert directly instead.
         publish(
             sns,
             os.environ.get("SNS_TOPIC_ARN", ""),
             "AFT pipeline drift check failed",
             f"The AFT pipeline drift detector raised an error:\n\n{exc}",
         )
-        raise
+        if not job_id:
+            raise
+        return {"error": str(exc)}
 
     if job_id:
-        codepipeline.put_job_success_result(jobId=job_id)
+        _report_job(job_id)
     return result
+
+
+def _report_job(job_id: str, exc: Exception | None = None) -> bool:
+    """Answer the CodePipeline job. Returns False if the answer could not be sent."""
+    try:
+        if exc is None:
+            codepipeline.put_job_success_result(jobId=job_id)
+        else:
+            codepipeline.put_job_failure_result(
+                jobId=job_id,
+                failureDetails={
+                    "type": "JobFailed",
+                    # The API allows 1-5000 characters; an empty message fails
+                    # client-side validation, which would leave the job unanswered.
+                    "message": str(exc)[:5000] or exc.__class__.__name__,
+                },
+            )
+    except Exception:
+        logger.exception("Could not report job result for %s", job_id)
+        return False
+    return True
 
 
 def detect_and_run(job: dict) -> dict:
@@ -83,12 +104,23 @@ def detect_and_run(job: dict) -> dict:
             f"Could not resolve HEAD revisions from probe pipeline {probe_pipeline}. "
             "Check the CodeConnections connection and the probe pipeline's source stage."
         )
+
+    # Drift is judged by comparing source action names. If AFT ever renames or
+    # adds one, every pipeline would silently look permanently drifted and all of
+    # them would be started daily - so fail loudly on a mismatch instead.
+    expected = set(source_actions())
+    if expected and set(head) != expected:
+        raise RuntimeError(
+            f"Probe pipeline {probe_pipeline} resolved source actions {sorted(head)}, "
+            f"but this module is configured for {sorted(expected)}. AFT's source action "
+            "names have changed; update the module before drift can be judged."
+        )
     logger.info("HEAD revisions: %s", {k: short(v) for k, v in head.items()})
 
     pipelines = list_aft_pipelines(codepipeline, pattern)
     logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
 
-    drifted, skipped = [], []
+    drifted, skipped, failing = [], [], []
     for name in pipelines:
         status = pipeline_status(codepipeline, name, head)
         if not status["drifted"]:
@@ -96,9 +128,14 @@ def detect_and_run(job: dict) -> dict:
         if status["active"]:
             skipped.append(status)
             continue
+        if status["failed_on_head"]:
+            # Its newest attempt already ran HEAD and failed. Restarting it every
+            # day would just repeat the failure, so report it and move on.
+            failing.append(status)
+            continue
         drifted.append(status)
 
-    started, deferred = start_pipelines(codepipeline, drifted, max_runs, dry_run)
+    started, deferred, failed_to_start = start_pipelines(codepipeline, drifted, max_runs, dry_run)
 
     summary = {
         "probe_pipeline": probe_pipeline,
@@ -107,22 +144,39 @@ def detect_and_run(job: dict) -> dict:
         "drifted": [s["pipeline"] for s in drifted],
         "started": [s["pipeline"] for s in started],
         "skipped_already_running": [s["pipeline"] for s in skipped],
+        "failing_on_head": [s["pipeline"] for s in failing],
         "deferred_over_limit": [s["pipeline"] for s in deferred],
+        "failed_to_start": [s["pipeline"] for s in failed_to_start],
         "dry_run": dry_run,
     }
     logger.info("Drift check summary: %s", json.dumps(summary, default=str))
 
-    if env_flag("NOTIFY_ON_DRIFT", True) and drifted:
-        publish(
-            sns,
-            topic_arn,
-            f"AFT drift check: {len(drifted)} pipeline(s) behind HEAD",
-            _format_message(summary, head, drifted, skipped, deferred, dry_run),
-        )
+    if env_flag("NOTIFY_ON_DRIFT", True) and (drifted or failing or failed_to_start):
+        # Notification failure must not invert a run whose starts all succeeded.
+        try:
+            publish(
+                sns,
+                topic_arn,
+                _subject(summary, drifted, failing),
+                _format_message(summary, head, drifted, skipped, deferred, failing, dry_run),
+            )
+        except Exception:
+            logger.exception("Could not publish the drift check summary")
     return summary
 
 
-def _format_message(summary, head, drifted, skipped, deferred, dry_run) -> str:
+def _subject(summary: dict, drifted: list, failing: list) -> str:
+    parts = []
+    if drifted:
+        parts.append(f"{len(drifted)} behind HEAD")
+    if failing:
+        parts.append(f"{len(failing)} failing on HEAD")
+    if summary["failed_to_start"]:
+        parts.append(f"{len(summary['failed_to_start'])} could not be started")
+    return f"AFT drift check: {', '.join(parts)}"
+
+
+def _format_message(summary, head, drifted, skipped, deferred, failing, dry_run) -> str:
     to_run = len(drifted) - len(deferred)
     lines = [
         "AFT customizations pipeline drift check",
@@ -142,6 +196,18 @@ def _format_message(summary, head, drifted, skipped, deferred, dry_run) -> str:
         lines.append(f"  {status['pipeline']} (last successful: {applied})")
     if skipped:
         lines += ["", "Skipped, already running:", *[f"  {s['pipeline']}" for s in skipped]]
+    if failing:
+        lines += [
+            "",
+            "Not started - newest execution already ran HEAD and did not succeed:",
+            *[f"  {s['pipeline']} [{s['status']}]" for s in failing],
+        ]
+    if summary["failed_to_start"]:
+        lines += [
+            "",
+            "Could not be started:",
+            *[f"  {s}" for s in summary["failed_to_start"]],
+        ]
     if deferred:
         lines += [
             "",

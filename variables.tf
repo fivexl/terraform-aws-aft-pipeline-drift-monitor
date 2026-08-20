@@ -21,7 +21,7 @@ variable "pipeline_name_pattern" {
 }
 
 variable "failure_pipeline_name_suffix" {
-  description = "Pipeline name suffix the EventBridge failure rule matches on. Must be consistent with pipeline_name_pattern."
+  description = "Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline_name_pattern - a wrong value causes AccessDenied, not just missing alerts."
   type        = string
   default     = "-customizations-pipeline"
 }
@@ -39,7 +39,7 @@ variable "report_schedule_expression" {
 }
 
 variable "full_run_schedule_expression" {
-  description = "Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC. Set it after schedule_expression so it does not race the daily drift check."
+  description = "Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report_schedule_expression, so Monday's report describes a full run that is still in flight."
   type        = string
   default     = "cron(0 6 ? * MON *)"
 }
@@ -51,24 +51,24 @@ variable "detect_changes" {
 }
 
 variable "dry_run" {
-  description = "Detect and report drift without starting any AFT pipeline. Useful for the first few days in a new organisation."
+  description = "Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation."
   type        = bool
   default     = false
 }
 
 variable "max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control."
+  description = "Maximum number of AFT pipelines to start in a single drift check or weekly full run. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. The full run selects oldest-execution-first, so a cap below your account count rotates rather than starving the same accounts."
   type        = number
   default     = 20
 
   validation {
-    condition     = var.max_pipelines_per_run >= 1
-    error_message = "max_pipelines_per_run must be at least 1."
+    condition     = var.max_pipelines_per_run >= 1 && floor(var.max_pipelines_per_run) == var.max_pipelines_per_run
+    error_message = "max_pipelines_per_run must be a whole number of at least 1."
   }
 }
 
 variable "notify_on_drift" {
-  description = "Publish an SNS message listing the pipelines started by each drift check. Failures are always published, by the EventBridge failure rule."
+  description = "Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the weekly full run summary, nor the EventBridge failure alerts, which are always published."
   type        = bool
   default     = true
 }
@@ -109,13 +109,13 @@ variable "python_runtime" {
 }
 
 variable "lambda_memory_size" {
-  description = "Memory in MB for both Lambda functions."
+  description = "Memory in MB for all three Lambda functions."
   type        = number
   default     = 512
 }
 
 variable "drift_detector_timeout" {
-  description = "Timeout in seconds for the drift detector. It walks every AFT pipeline's execution history, so scale it with the number of vended accounts."
+  description = "Timeout in seconds for the drift detector. It reads the last 10 executions of every AFT pipeline, so scale it with the number of vended accounts."
   type        = number
   default     = 600
 }
@@ -127,19 +127,19 @@ variable "status_report_timeout" {
 }
 
 variable "full_run_timeout" {
-  description = "Timeout in seconds for the weekly full run Lambda. It walks every AFT pipeline's execution history before starting it, so scale it with the number of vended accounts."
+  description = "Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts."
   type        = number
   default     = 600
 }
 
 variable "log_retention_in_days" {
-  description = "CloudWatch Logs retention for both Lambda functions."
+  description = "CloudWatch Logs retention for all three Lambda functions."
   type        = number
   default     = 30
 }
 
 variable "log_level" {
-  description = "Python log level for both Lambda functions."
+  description = "Python log level for all three Lambda functions."
   type        = string
   default     = "INFO"
 
@@ -156,7 +156,7 @@ variable "artifact_bucket_name" {
 }
 
 variable "artifact_retention_days" {
-  description = "Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run."
+  description = "Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. Non-current versions expire one day later, so total retention is this plus one."
   type        = number
   default     = 7
 

@@ -1,4 +1,5 @@
 provider "aws" {
+  # Change to your AFT home region.
   region = "eu-central-1"
 }
 
@@ -19,6 +20,9 @@ module "aft_pipeline_drift_monitor" {
   # happened inside an account rather than in the repository. Push this out to a
   # far-future cron if you only want commit-driven re-runs.
   full_run_schedule_expression = "cron(0 6 ? * MON *)"
+
+  # Keep this at or above your account count for a full sweep every week; below
+  # it, the run rotates oldest-first across successive weeks.
 
   # Don't stampede CodeBuild and the account Terraform states.
   max_pipelines_per_run = 20

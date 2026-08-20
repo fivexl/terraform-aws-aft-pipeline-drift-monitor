@@ -60,6 +60,9 @@ Four signals, one SNS topic:
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
 | Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
 
+All four go to one SNS topic, so one subscription — email, or a Slack channel via
+`enable_chatbot` — covers the whole module.
+
 ## Two different kinds of drift
 
 The daily check and the weekly full run answer different questions, which is why
@@ -176,6 +179,40 @@ publishing; a condition that is never populated denies the call and drops every
 failure alert with no visible error. That is why this module's own key and topic
 policies carry no condition on `events.amazonaws.com`.
 
+### Slack, via Amazon Q Developer in chat applications
+
+Set `enable_chatbot = true` with a workspace and channel id to have all four
+signals delivered into a Slack channel instead of (or alongside) an email
+subscription:
+
+```hcl
+  enable_chatbot     = true
+  slack_workspace_id = "T07EA123LEP" # the workspace, not its name
+  slack_channel_id   = "C07EZ1ABC23" # from the channel details, not its name
+```
+
+One prerequisite Terraform cannot do for you: **authorize the Slack workspace
+once, by hand**, in the Amazon Q Developer in chat applications console, and
+invite the `@Amazon Q` app to the channel. Authorizing is what produces the
+workspace id above. Terraform can create the channel configuration, but not the
+OAuth grant behind it.
+
+The module creates a read-only role for Chatbot to assume, and applies
+`ReadOnlyAccess` as the channel guardrail — AWS applies **`AdministratorAccess`**
+when guardrails are unset, which is not a default a notification channel should
+carry. Override either with `chatbot_iam_role_arn` or
+`chatbot_guardrail_policy_arns`.
+
+The encrypted topic is not a problem here, and is in fact required: Chatbot needs
+a **customer-managed** key, because the AWS-managed `alias/aws/sns` key's policy
+cannot be edited to let publishers use it. The module already creates a CMK for
+exactly that reason. Chatbot itself needs no KMS permission — SNS decrypts before
+delivery.
+
+If you point `sns_topic_arn` at a topic this module does **not** manage, add
+`sns:Subscribe` for `chatbot.amazonaws.com` to that topic's policy yourself; the
+module can only write the policy of a topic it creates.
+
 ### A topic in another account
 
 Supported. The failure-notification target publishes through an IAM role rather
@@ -265,6 +302,7 @@ week (several CodeBuild actions each).
 
 | Name | Type |
 |------|------|
+| [aws_chatbot_slack_channel_configuration.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/chatbot_slack_channel_configuration) | resource |
 | [aws_cloudwatch_event_rule.daily_drift_check](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.pipeline_failed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
 | [aws_cloudwatch_event_rule.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_rule) | resource |
@@ -274,9 +312,11 @@ week (several CodeBuild actions each).
 | [aws_cloudwatch_event_target.status_report](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_cloudwatch_event_target.weekly_full_run](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_event_target) | resource |
 | [aws_codepipeline.revision_probe](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/codepipeline) | resource |
+| [aws_iam_role.chatbot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.eventbridge_sns](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role_policy.chatbot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.eventbridge_sns](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.probe_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
@@ -292,6 +332,8 @@ week (several CodeBuild actions each).
 | [aws_sns_topic_policy.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic_policy) | resource |
 | [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
 | [aws_iam_policy_document.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.chatbot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.chatbot_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.drift_detector](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.eventbridge_pipeline_assume](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
@@ -315,10 +357,14 @@ week (several CodeBuild actions each).
 |------|-------------|------|---------|:--------:|
 | <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
 | <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. Non-current versions expire one day later, so total retention is this plus one. | `number` | `7` | no |
+| <a name="input_chatbot_guardrail_policy_arns"></a> [chatbot\_guardrail\_policy\_arns](#input\_chatbot\_guardrail\_policy\_arns) | IAM policy ARNs applied as channel guardrails, capping what anyone can do through the channel. AWS applies AdministratorAccess when this is empty, so the default here is read-only instead. | `list(string)` | <pre>[<br/>  "arn:aws:iam::aws:policy/ReadOnlyAccess"<br/>]</pre> | no |
+| <a name="input_chatbot_iam_role_arn"></a> [chatbot\_iam\_role\_arn](#input\_chatbot\_iam\_role\_arn) | ARN of an existing role for Chatbot to assume. Leave empty to have the module create a read-only one. | `string` | `""` | no |
+| <a name="input_chatbot_logging_level"></a> [chatbot\_logging\_level](#input\_chatbot\_logging\_level) | CloudWatch logging level for the Chatbot configuration: ERROR, INFO or NONE. | `string` | `"NONE"` | no |
 | <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn. | `bool` | `true` | no |
 | <a name="input_detect_changes"></a> [detect\_changes](#input\_detect\_changes) | Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook. | `bool` | `true` | no |
 | <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It reads the last 10 executions of every AFT pipeline, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation. | `bool` | `false` | no |
+| <a name="input_enable_chatbot"></a> [enable\_chatbot](#input\_enable\_chatbot) | Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack\_workspace\_id. | `bool` | `false` | no |
 | <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. | `string` | `"-customizations-pipeline"` | no |
 | <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report\_schedule\_expression, so Monday's report describes a full run that is still in flight. | `string` | `"cron(0 6 ? * MON *)"` | no |
 | <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |
@@ -334,6 +380,8 @@ week (several CodeBuild actions each).
 | <a name="input_python_runtime"></a> [python\_runtime](#input\_python\_runtime) | Lambda Python runtime. | `string` | `"python3.14"` | no |
 | <a name="input_report_schedule_expression"></a> [report\_schedule\_expression](#input\_report\_schedule\_expression) | Schedule for the status report. Set it a few hours after schedule\_expression so the pipelines started by the drift check have finished. | `string` | `"cron(0 8 * * ? *)"` | no |
 | <a name="input_schedule_expression"></a> [schedule\_expression](#input\_schedule\_expression) | Schedule for the daily drift check. Starts the revision probe pipeline, which resolves HEAD through the AFT CodeConnections connection and then invokes the drift detector. | `string` | `"cron(0 2 * * ? *)"` | no |
+| <a name="input_slack_channel_id"></a> [slack\_channel\_id](#input\_slack\_channel\_id) | Slack channel id the notifications are posted to. Looks like C07EZ1ABC23 - copy it from the channel details, not the channel name. | `string` | `""` | no |
+| <a name="input_slack_workspace_id"></a> [slack\_workspace\_id](#input\_slack\_workspace\_id) | Slack workspace (team) id, as returned when you authorize the workspace in the Amazon Q Developer in chat applications console. Looks like T07EA123LEP. | `string` | `""` | no |
 | <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of an existing SNS topic to publish to, in this account or another. Takes precedence over create\_sns\_topic. The topic policy must allow sns:Publish to this account or to the specific principals: the three Lambda roles and the pipeline\_failed\_target\_role\_arn output. An encrypted topic in another account is not supported - see the README. | `string` | `""` | no |
 | <a name="input_status_report_timeout"></a> [status\_report\_timeout](#input\_status\_report\_timeout) | Timeout in seconds for the status report Lambda. | `number` | `300` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Tags applied to every resource that supports them. | `map(string)` | `{}` | no |
@@ -343,6 +391,8 @@ week (several CodeBuild actions each).
 | Name | Description |
 |------|-------------|
 | <a name="output_artifact_bucket_name"></a> [artifact\_bucket\_name](#output\_artifact\_bucket\_name) | Name of the S3 bucket holding the revision probe pipeline's artifacts. |
+| <a name="output_chatbot_configuration_arn"></a> [chatbot\_configuration\_arn](#output\_chatbot\_configuration\_arn) | ARN of the Chatbot Slack channel configuration, or null when enable\_chatbot is false. |
+| <a name="output_chatbot_iam_role_arn"></a> [chatbot\_iam\_role\_arn](#output\_chatbot\_iam\_role\_arn) | Role Chatbot assumes - the one supplied via chatbot\_iam\_role\_arn, the one this module created, or null when enable\_chatbot is false. |
 | <a name="output_daily_drift_check_rule_name"></a> [daily\_drift\_check\_rule\_name](#output\_daily\_drift\_check\_rule\_name) | Name of the EventBridge rule that runs the daily drift check. |
 | <a name="output_drift_detector_function_arn"></a> [drift\_detector\_function\_arn](#output\_drift\_detector\_function\_arn) | ARN of the drift detector Lambda function. |
 | <a name="output_drift_detector_function_name"></a> [drift\_detector\_function\_name](#output\_drift\_detector\_function\_name) | Name of the drift detector Lambda function. |

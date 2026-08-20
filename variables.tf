@@ -171,3 +171,58 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+########################################################################
+# Slack delivery via Amazon Q Developer in chat applications (AWS Chatbot)
+########################################################################
+
+variable "enable_chatbot" {
+  description = "Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack_workspace_id."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.enable_chatbot || (var.slack_workspace_id != "" && var.slack_channel_id != "")
+    error_message = "enable_chatbot requires both slack_workspace_id and slack_channel_id."
+  }
+}
+
+variable "slack_workspace_id" {
+  description = "Slack workspace (team) id, as returned when you authorize the workspace in the Amazon Q Developer in chat applications console. Looks like T07EA123LEP."
+  type        = string
+  default     = ""
+}
+
+variable "slack_channel_id" {
+  description = "Slack channel id the notifications are posted to. Looks like C07EZ1ABC23 - copy it from the channel details, not the channel name."
+  type        = string
+  default     = ""
+}
+
+variable "chatbot_iam_role_arn" {
+  description = "ARN of an existing role for Chatbot to assume. Leave empty to have the module create a read-only one."
+  type        = string
+  default     = ""
+}
+
+variable "chatbot_guardrail_policy_arns" {
+  description = "IAM policy ARNs applied as channel guardrails, capping what anyone can do through the channel. AWS applies AdministratorAccess when this is empty, so the default here is read-only instead."
+  type        = list(string)
+  default     = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
+
+  validation {
+    condition     = length(var.chatbot_guardrail_policy_arns) > 0
+    error_message = "chatbot_guardrail_policy_arns must not be empty: an empty list makes AWS fall back to AdministratorAccess."
+  }
+}
+
+variable "chatbot_logging_level" {
+  description = "CloudWatch logging level for the Chatbot configuration: ERROR, INFO or NONE."
+  type        = string
+  default     = "NONE"
+
+  validation {
+    condition     = contains(["ERROR", "INFO", "NONE"], var.chatbot_logging_level)
+    error_message = "chatbot_logging_level must be one of ERROR, INFO, NONE."
+  }
+}

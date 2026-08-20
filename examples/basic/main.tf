@@ -27,6 +27,13 @@ module "aft_pipeline_drift_monitor" {
   # Don't stampede CodeBuild and the account Terraform states.
   max_pipelines_per_run = 20
 
+  # Deliver every signal into Slack. Authorize the workspace once by hand in the
+  # Amazon Q Developer in chat applications console first - that is what gives
+  # you the workspace id, and Terraform cannot create the OAuth grant.
+  # enable_chatbot     = true
+  # slack_workspace_id = "T07EA123LEP"
+  # slack_channel_id   = "C07EZ1ABC23"
+
   tags = {
     Project = "aft"
   }

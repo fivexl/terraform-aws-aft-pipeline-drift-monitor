@@ -72,3 +72,13 @@ output "pipeline_failed_rule_name" {
   description = "Name of the EventBridge rule that forwards pipeline failures to SNS."
   value       = aws_cloudwatch_event_rule.pipeline_failed.name
 }
+
+output "chatbot_configuration_arn" {
+  description = "ARN of the Chatbot Slack channel configuration, or null when enable_chatbot is false."
+  value       = one(aws_chatbot_slack_channel_configuration.this[*].chat_configuration_arn)
+}
+
+output "chatbot_iam_role_arn" {
+  description = "Role Chatbot assumes - the one supplied via chatbot_iam_role_arn, the one this module created, or null when enable_chatbot is false."
+  value       = var.enable_chatbot ? local.chatbot_role_arn : null
+}

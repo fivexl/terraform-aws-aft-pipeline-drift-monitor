@@ -34,6 +34,27 @@ data "aws_iam_policy_document" "sns_topic" {
     }
   }
 
+  # The docs do not say whether the Subscribe call is made by the caller's
+  # credentials or by Chatbot after the configuration is created. If it is the
+  # service, a missing grant fails silently - so grant it. Deliberately without
+  # a source condition: an unpopulated condition key on a service-principal
+  # call denies it silently, which is the failure this statement exists to
+  # avoid. Scope is Chatbot subscribing to this module's own topic.
+  dynamic "statement" {
+    for_each = var.enable_chatbot ? [1] : []
+
+    content {
+      sid       = "AllowChatbotSubscribe"
+      actions   = ["sns:Subscribe"]
+      resources = [aws_sns_topic.this[0].arn]
+
+      principals {
+        type        = "Service"
+        identifiers = ["chatbot.amazonaws.com"]
+      }
+    }
+  }
+
   statement {
     sid = "AllowAccountOwner"
     actions = [

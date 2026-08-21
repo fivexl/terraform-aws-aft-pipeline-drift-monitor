@@ -42,13 +42,22 @@ EventBridge (daily)                push to customizations repo (optional)
                           │  pipeline last applied successfully
                           ├──► start_pipeline_execution on the stale ones
                           └──► SNS: "N pipelines behind HEAD, started N"
-
-EventBridge (any *-customizations-pipeline FAILED) ──────────► SNS
-
-EventBridge (a few hours later) ──► status report Lambda ────► SNS
-
-EventBridge (weekly) ──────────────► full run Lambda ────────► starts EVERY
-                                                               pipeline, then SNS
+                                 │
+EventBridge (any *-customizations-pipeline FAILED) ───────────┤
+                                                                │
+EventBridge (a few hours later) ──► status report Lambda ─────┤
+                                                                │
+EventBridge (weekly) ──────────────► full run Lambda ──────────┤
+                                       starts EVERY pipeline    │
+                                                                 ▼
+                                                          SNS topic
+                                                        ┌──────┴──────┐
+                                                        ▼             ▼
+                                                emailed subscriber   AWS Chatbot
+                                                  (or your own       (enable_chatbot)
+                                                   subscription)          │
+                                                                          ▼
+                                                                    Slack channel
 ```
 
 Four signals, one SNS topic:
@@ -60,8 +69,10 @@ Four signals, one SNS topic:
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
 | Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
 
-All four go to one SNS topic, so one subscription — email, or a Slack channel via
-`enable_chatbot` — covers the whole module.
+All four go to one SNS topic, so one subscription covers the whole module —
+email, or Slack via `enable_chatbot` (see below). Both can be attached to the
+same topic at once; they are independent delivery paths, not alternatives you
+choose between once and for all.
 
 ## Two different kinds of drift
 

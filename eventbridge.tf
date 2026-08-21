@@ -131,8 +131,20 @@ resource "aws_cloudwatch_event_target" "pipeline_failed" {
       time      = "$.time"
     }
 
-    # A bare JSON string becomes the SNS message body verbatim.
-    input_template = "\"AFT pipeline <pipeline> FAILED at <time> (execution <execution>). https://<region>.console.aws.amazon.com/codesuite/codepipeline/pipelines/<pipeline>/executions/<execution>?region=<region>\""
+    # AWS Chatbot only renders default service events or its custom
+    # notification schema (see aft_pipelines.chatbot_envelope) - a bare string
+    # is silently discarded. A plain subscriber (e.g. email) gets raw JSON if
+    # it received the envelope instead, so the shape is conditional on
+    # enable_chatbot rather than always wrapped.
+    input_template = var.enable_chatbot ? jsonencode({
+      version = "1.0"
+      source  = "custom"
+      content = {
+        textType    = "client-markdown"
+        title       = "AFT pipeline failed"
+        description = "AFT pipeline <pipeline> FAILED at <time> (execution <execution>). https://<region>.console.aws.amazon.com/codesuite/codepipeline/pipelines/<pipeline>/executions/<execution>?region=<region>"
+      }
+    }) : "\"AFT pipeline <pipeline> FAILED at <time> (execution <execution>). https://<region>.console.aws.amazon.com/codesuite/codepipeline/pipelines/<pipeline>/executions/<execution>?region=<region>\""
   }
 }
 

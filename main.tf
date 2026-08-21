@@ -92,6 +92,7 @@ locals {
     SNS_TOPIC_ARN         = local.sns_topic_arn
     SOURCE_ACTIONS        = join(",", local.source_actions)
     LOG_LEVEL             = var.log_level
+    ENABLE_CHATBOT        = tostring(var.enable_chatbot)
   }
 }
 

@@ -22,6 +22,7 @@ way to learn HEAD without a separate GitHub credential.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -210,9 +211,39 @@ def start_pipelines(
     return started, deferred, failed
 
 
+def chatbot_envelope(subject: str, message: str) -> str:
+    """Wrap a subject/message pair in Chatbot's custom notification schema.
+
+    AWS Chatbot only renders default AWS service events or this schema; a plain
+    string is silently discarded, with nothing logged unless the Chatbot
+    configuration's LoggingLevel is ERROR. See
+    https://docs.aws.amazon.com/chatbot/latest/adminguide/custom-notifs.html.
+    ``title`` is capped at 250 characters and ``description`` at 8000, per the
+    same reference.
+    """
+    return json.dumps(
+        {
+            "version": "1.0",
+            "source": "custom",
+            "content": {
+                "textType": "client-markdown",
+                "title": subject[:250],
+                "description": message[:8000],
+            },
+        }
+    )
+
+
 def publish(client: Any, topic_arn: str, subject: str, message: str) -> None:
-    """Publish to SNS, truncating to the service limits."""
+    """Publish to SNS, truncating to the service limits.
+
+    Wraps the message in Chatbot's custom notification envelope when
+    ENABLE_CHATBOT is set, so Slack delivery doesn't discard it. Left as plain
+    text otherwise, so an email subscriber doesn't receive raw JSON.
+    """
     if not topic_arn:
         logger.warning("No SNS topic configured, dropping message: %s", subject)
         return
+    if env_flag("ENABLE_CHATBOT"):
+        message = chatbot_envelope(subject, message)
     client.publish(TopicArn=topic_arn, Subject=subject[:100], Message=message[:262144])

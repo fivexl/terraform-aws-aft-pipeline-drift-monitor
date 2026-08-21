@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `events.amazonaws.com` service principal, which AWS only accepts for a topic
   in the same account as the rule.
 
+- Optional Slack delivery through Amazon Q Developer in chat applications
+  (`enable_chatbot`), using the AWS provider's native
+  `aws_chatbot_slack_channel_configuration` so no extra provider is required.
+  Creates a read-only role for Chatbot and applies `ReadOnlyAccess` as the
+  channel guardrail rather than AWS's `AdministratorAccess` default.
+
 ### Notes
 
 - Requires Terraform **>= 1.9.0**: the `create_sns_topic` validation references

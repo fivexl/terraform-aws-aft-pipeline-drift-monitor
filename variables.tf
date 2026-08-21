@@ -217,9 +217,9 @@ variable "chatbot_guardrail_policy_arns" {
 }
 
 variable "chatbot_logging_level" {
-  description = "CloudWatch logging level for the Chatbot configuration: ERROR, INFO or NONE."
+  description = "CloudWatch logging level for the Chatbot configuration: ERROR, INFO or NONE. ERROR is the default because NONE hides a message Chatbot rejects (e.g. wrong format) with nothing logged anywhere."
   type        = string
-  default     = "NONE"
+  default     = "ERROR"
 
   validation {
     condition     = contains(["ERROR", "INFO", "NONE"], var.chatbot_logging_level)

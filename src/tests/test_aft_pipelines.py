@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import aft_pipelines
 from tests.conftest import ACCOUNT, GLOBAL, HEAD_ACCOUNT, HEAD_GLOBAL, OLD_GLOBAL, PROBE
 
@@ -86,3 +88,30 @@ def test_pipeline_status_judges_drift_against_last_success(cp):
 def test_publish_is_a_noop_without_a_topic(sns):
     aft_pipelines.publish(sns, "", "subject", "message")
     assert sns.messages == []
+
+
+def test_publish_sends_plain_text_by_default(sns, monkeypatch):
+    monkeypatch.delenv("ENABLE_CHATBOT", raising=False)
+    aft_pipelines.publish(sns, "arn:aws:sns:us-east-1:123456789012:topic", "subject", "message")
+    assert sns.messages[-1]["message"] == "message"
+
+
+def test_publish_wraps_in_chatbot_envelope_when_enabled(sns, monkeypatch):
+    monkeypatch.setenv("ENABLE_CHATBOT", "true")
+    aft_pipelines.publish(sns, "arn:aws:sns:us-east-1:123456789012:topic", "subject", "message")
+    envelope = json.loads(sns.messages[-1]["message"])
+    assert envelope == {
+        "version": "1.0",
+        "source": "custom",
+        "content": {
+            "textType": "client-markdown",
+            "title": "subject",
+            "description": "message",
+        },
+    }
+
+
+def test_chatbot_envelope_truncates_to_service_limits():
+    envelope = json.loads(aft_pipelines.chatbot_envelope("t" * 300, "d" * 9000))
+    assert len(envelope["content"]["title"]) == 250
+    assert len(envelope["content"]["description"]) == 8000

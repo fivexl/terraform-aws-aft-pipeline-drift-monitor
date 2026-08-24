@@ -5,7 +5,16 @@ from __future__ import annotations
 import pytest
 
 import drift_detector
-from tests.conftest import PROBE
+from tests.conftest import (
+    ACCOUNT,
+    GLOBAL,
+    HEAD_ACCOUNT,
+    HEAD_GLOBAL,
+    OLD_GLOBAL,
+    PROBE,
+    job_event,
+    summary,
+)
 
 #: Behind HEAD, idle, and worth another run.
 STARTED = [
@@ -23,26 +32,26 @@ def wire_clients(monkeypatch, cp, sns):
     monkeypatch.setattr(drift_detector, "sns", sns)
 
 
-def job_event(execution_id: str) -> dict:
-    return {
-        "CodePipeline.job": {
-            "id": "job-1",
-            "data": {
-                "pipelineContext": {
-                    "pipelineName": PROBE,
-                    "pipelineExecutionId": execution_id,
-                }
-            },
-        }
-    }
+def test_head_comes_from_the_job_input_artifacts(cp):
+    """AWS omits pipelineContext from Lambda action events, so the input
+    artifacts' revisions are the only in-event source of this run's HEAD.
 
+    The probe's history is poisoned with a stale commit: if it were consulted,
+    HEAD would be wrong and the pipeline that is genuinely current would be
+    restarted while the drifted ones were left alone.
+    """
+    cp.pipelines[PROBE] = [summary("Succeeded", OLD_GLOBAL, OLD_GLOBAL)]
 
-def probe_job(cp) -> dict:
-    return job_event(cp.pipelines[PROBE][0]["pipelineExecutionId"])
+    result = drift_detector.lambda_handler(job_event(), None)
+
+    assert result["head_revisions"] == {GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}
+    assert PROBE not in cp.execution_lookups
+    assert cp.started == STARTED
+    assert CURRENT not in cp.started
 
 
 def test_starts_only_drifted_idle_pipelines(cp, sns):
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert cp.started == STARTED
     assert result["started"] == STARTED
@@ -55,7 +64,7 @@ def test_starts_only_drifted_idle_pipelines(cp, sns):
 
 def test_does_not_restart_a_pipeline_that_already_failed_on_head(cp, sns):
     """The restart loop guard: another run would only repeat the same failure."""
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert FAILING_ON_HEAD not in cp.started
     assert result["failing_on_head"] == [FAILING_ON_HEAD]
@@ -66,7 +75,7 @@ def test_does_not_restart_a_pipeline_that_already_failed_on_head(cp, sns):
 def test_dry_run_reports_without_starting_anything(monkeypatch, cp, sns):
     monkeypatch.setenv("DRY_RUN", "true")
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert result["drifted"] == STARTED
     assert result["started"] == []
@@ -77,7 +86,7 @@ def test_dry_run_reports_without_starting_anything(monkeypatch, cp, sns):
 def test_respects_max_pipelines_per_run(monkeypatch, cp):
     monkeypatch.setenv("MAX_PIPELINES_PER_RUN", "1")
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert cp.started == STARTED[:1]
     assert result["deferred_over_limit"] == STARTED[1:]
@@ -86,7 +95,7 @@ def test_respects_max_pipelines_per_run(monkeypatch, cp):
 def test_one_unstartable_pipeline_does_not_abort_the_others(cp, sns):
     cp.start_errors = {STARTED[0]}
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert cp.started == STARTED[1:]
     assert result["failed_to_start"] == STARTED[:1]
@@ -98,7 +107,7 @@ def test_renamed_source_action_fails_loudly(monkeypatch, cp, sns):
     """A silent rename would mark every pipeline drifted and start them all."""
     monkeypatch.setenv("SOURCE_ACTIONS", "aft-global-customizations,aft-renamed")
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert "source action" in result["error"]
     assert cp.started == []
@@ -110,7 +119,7 @@ def test_publish_failure_does_not_fail_the_job(cp, sns):
     """Starts already succeeded, so a notification error must not invert the result."""
     sns.fail = True
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert cp.started == STARTED
     assert result["started"] == STARTED
@@ -157,8 +166,10 @@ def test_unreported_job_success_alert_failure_does_not_break_the_result(cp, sns)
 
 
 def test_direct_invocation_resolves_head_from_latest_probe_execution(cp):
+    """No job means no input artifacts, so the probe's history is the fallback."""
     result = drift_detector.lambda_handler({}, None)
 
+    assert PROBE in cp.execution_lookups
     assert cp.started == STARTED
     assert cp.job_results == []
     assert result["pipelines_checked"] == 5

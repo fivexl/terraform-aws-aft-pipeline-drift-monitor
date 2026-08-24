@@ -14,10 +14,12 @@ These helpers answer two questions:
 
 HEAD comes from the *revision probe* pipeline that this module creates: it uses
 the same CodeConnections connection and the same repositories, so CodePipeline
-resolves HEAD from GitHub on our behalf and reports it in the execution's
-source revisions. There is no public CodeConnections API to read a commit from
-a connected repository, so borrowing CodePipeline's own resolution is the only
-way to learn HEAD without a separate GitHub credential.
+resolves HEAD from GitHub on our behalf. The drift detector reads it out of its
+own job event (``revisions_from_job_artifacts``); everything else that needs HEAD
+is not a CodePipeline action and reads the probe's latest execution instead
+(``head_revisions``). There is no public CodeConnections API to read a commit
+from a connected repository, so borrowing CodePipeline's own resolution is the
+only way to learn HEAD without a separate GitHub credential.
 """
 
 from __future__ import annotations
@@ -90,6 +92,27 @@ def revisions_from_summary(summary: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def revisions_from_job_artifacts(job: dict[str, Any]) -> dict[str, str]:
+    """Extract ``{action_name: commit_id}`` from a CodePipeline Lambda job event.
+
+    CodePipeline delivers every input artifact's resolved commit id in the job
+    event itself, as ``data.inputArtifacts[].revision`` - the GitHub commit id
+    for ``CodeStarSourceConnection`` sources. That makes the probe execution's
+    own HEAD readable without looking up any execution history, which matters
+    because the Lambda action event omits ``pipelineContext`` entirely, so there
+    is no execution id to look up. See
+    https://docs.aws.amazon.com/codepipeline/latest/userguide/action-reference-Lambda.html.
+
+    Returns ``{}`` when there is no job or its artifacts carry no revisions, so
+    callers can fall back to ``head_revisions``.
+    """
+    return {
+        canonical_action(artifact["name"]): artifact["revision"]
+        for artifact in job.get("data", {}).get("inputArtifacts", [])
+        if artifact.get("name") and artifact.get("revision")
+    }
+
+
 def executions(client: Any, pipeline: str, limit: int = 10) -> list[dict[str, Any]]:
     """Return the most recent execution summaries for ``pipeline``, newest first."""
     response = client.list_pipeline_executions(pipelineName=pipeline, maxResults=limit)
@@ -97,10 +120,12 @@ def executions(client: Any, pipeline: str, limit: int = 10) -> list[dict[str, An
 
 
 def head_revisions(client: Any, probe_pipeline: str, execution_id: str | None = None) -> dict[str, str]:
-    """Resolve HEAD per source action from the revision probe pipeline.
+    """Resolve HEAD per source action from the revision probe pipeline's history.
 
-    ``execution_id`` is the probe execution we are running inside; when omitted
-    (direct invocation) the most recent probe execution is used instead.
+    For callers that are *not* a CodePipeline action - the status report, the
+    weekly full run, and local/manual invocation - and so have no job event to
+    read revisions out of. ``execution_id`` pins a specific probe execution; when
+    omitted the most recent one that recorded revisions is used.
     """
     if execution_id:
         revisions = _execution_revisions(client, probe_pipeline, execution_id)

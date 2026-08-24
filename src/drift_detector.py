@@ -2,9 +2,10 @@
 
 Invoked as a CodePipeline ``Lambda`` action from the revision probe pipeline
 this module creates: the probe's source stage resolves HEAD of both
-customizations repositories through the existing CodeConnections connection,
-then hands control here. Every AFT pipeline whose last successful execution
-used an older commit is started (unless ``DRY_RUN`` is set).
+customizations repositories through the existing CodeConnections connection and
+passes them on as input artifacts, whose ``revision`` fields carry the resolved
+commit ids straight to this handler. Every AFT pipeline whose last successful
+execution used an older commit is started (unless ``DRY_RUN`` is set).
 
 Pipeline failures are reported to SNS by an EventBridge rule, not from here.
 """
@@ -26,6 +27,7 @@ from aft_pipelines import (
     list_aft_pipelines,
     pipeline_status,
     publish,
+    revisions_from_job_artifacts,
     short,
     source_actions,
     start_pipelines,
@@ -110,12 +112,21 @@ def detect_and_run(job: dict) -> dict:
     dry_run = env_flag("DRY_RUN")
     max_runs = int(os.environ.get("MAX_PIPELINES_PER_RUN", "20"))
 
-    context = job.get("data", {}).get("pipelineContext", {})
-    execution_id = (
-        context.get("pipelineExecutionId") if context.get("pipelineName") == probe_pipeline else None
-    )
-
-    head = head_revisions(codepipeline, probe_pipeline, execution_id)
+    # HEAD comes from the job event's input artifacts: CodePipeline stamps each
+    # one with the commit it resolved for this very execution. The event carries
+    # no pipelineContext (AWS omits it for Lambda actions), so there is no
+    # execution id to look up - and no need for one. head_revisions() remains the
+    # path for direct invocation, which has no job and therefore no artifacts.
+    head = revisions_from_job_artifacts(job)
+    if not head:
+        if job:
+            logger.warning(
+                "CodePipeline job carried no input artifact revisions; falling back to the "
+                "most recent %s execution. Check that the Detect-Drift action has "
+                "input_artifacts wired.",
+                probe_pipeline,
+            )
+        head = head_revisions(codepipeline, probe_pipeline)
     if not head:
         raise RuntimeError(
             f"Could not resolve HEAD revisions from probe pipeline {probe_pipeline}. "

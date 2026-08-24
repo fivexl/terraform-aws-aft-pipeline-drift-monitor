@@ -128,6 +128,34 @@ def test_unreportable_job_result_falls_back_to_sns(cp, sns):
     assert sns.messages[0]["subject"] == "AFT pipeline drift check failed"
 
 
+def test_unreported_job_success_alerts_without_changing_the_result(cp, sns):
+    """A dropped success callback leaves the action hanging, so it must be alerted."""
+    cp.job_result_errors = True
+
+    result = drift_detector.lambda_handler(probe_job(cp), None)
+
+    # The work stands: pipelines were started and the summary is returned as usual.
+    assert cp.started == STARTED
+    assert result["started"] == STARTED
+    assert cp.job_results == []
+
+    alert = sns.messages[-1]
+    assert alert["subject"] == "AFT drift check succeeded but CodePipeline was not notified"
+    assert "job-1" in alert["message"]
+    assert "action timeout" in alert["message"]
+
+
+def test_unreported_job_success_alert_failure_does_not_break_the_result(cp, sns):
+    """The alert is a best-effort side channel; SNS being down must not raise."""
+    cp.job_result_errors = True
+    sns.fail = True
+
+    result = drift_detector.lambda_handler(probe_job(cp), None)
+
+    assert result["started"] == STARTED
+    assert sns.messages == []
+
+
 def test_direct_invocation_resolves_head_from_latest_probe_execution(cp):
     result = drift_detector.lambda_handler({}, None)
 

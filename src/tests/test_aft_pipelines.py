@@ -55,6 +55,19 @@ def test_head_revisions_empty_when_probe_never_ran(cp):
     assert aft_pipelines.head_revisions(cp, PROBE) == {}
 
 
+def test_head_is_complete_rejects_a_partial_probe_result():
+    expected = {GLOBAL, ACCOUNT}
+    assert aft_pipelines.head_is_complete({GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}, expected)
+    # Mid-execution the account source may not have resolved yet.
+    assert not aft_pipelines.head_is_complete({GLOBAL: HEAD_GLOBAL}, expected)
+    assert not aft_pipelines.head_is_complete({}, expected)
+    # Renamed or extra action - the set no longer matches what we track.
+    assert not aft_pipelines.head_is_complete({GLOBAL: HEAD_GLOBAL, "x": HEAD_ACCOUNT}, expected)
+    # SOURCE_ACTIONS unset: nothing to validate against, any resolved head passes.
+    assert aft_pipelines.head_is_complete({GLOBAL: HEAD_GLOBAL}, set())
+    assert not aft_pipelines.head_is_complete({}, set())
+
+
 def test_pipeline_status_judges_drift_against_last_success(cp):
     head = {GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}
 

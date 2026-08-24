@@ -135,6 +135,18 @@ def _execution_revisions(client: Any, pipeline: str, execution_id: str) -> dict[
     }
 
 
+def head_is_complete(head: dict[str, str], expected: set[str]) -> bool:
+    """Whether ``head`` covers exactly the source actions the module tracks.
+
+    A probe execution inspected mid-flight can carry only *one* of the two source
+    revisions, and drift judged against half a HEAD is worse than none: pipelines
+    look current on the action that is missing. An empty ``expected`` means
+    SOURCE_ACTIONS is unset and there is nothing to validate against, so any
+    resolved head passes; an empty ``head`` never does.
+    """
+    return bool(head) and (not expected or set(head) == expected)
+
+
 def drifted_against(revisions: dict[str, str], head: dict[str, str]) -> bool:
     """Whether ``revisions`` differs from ``head`` on any tracked action."""
     return any(revisions.get(action) != revision for action, revision in head.items())

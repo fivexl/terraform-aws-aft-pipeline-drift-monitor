@@ -21,6 +21,7 @@ from aft_pipelines import (
     DEFAULT_PIPELINE_PATTERN,
     configure_logging,
     env_flag,
+    head_is_complete,
     head_revisions,
     list_aft_pipelines,
     pipeline_status,
@@ -59,8 +60,24 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
             raise
         return {"error": str(exc)}
 
-    if job_id:
-        _report_job(job_id)
+    if job_id and not _report_job(job_id):
+        # The work is done, but CodePipeline was never told. The action now hangs
+        # until its own timeout, which no EventBridge failure rule reports in the
+        # meantime - so alert directly. Best effort: the result still stands.
+        try:
+            publish(
+                sns,
+                os.environ.get("SNS_TOPIC_ARN", ""),
+                "AFT drift check succeeded but CodePipeline was not notified",
+                "The AFT pipeline drift check completed successfully, but reporting "
+                f"success for CodePipeline job {job_id} failed.\n\n"
+                "The probe pipeline's Detect-Drift action is now unanswered and will "
+                "hang until its action timeout expires. Any drifted pipelines were "
+                "already started, so no drift check needs to be repeated - see the "
+                "Lambda logs for the underlying PutJobSuccessResult error.",
+            )
+        except Exception:
+            logger.exception("Could not publish the unreported job-success alert")
     return result
 
 
@@ -109,7 +126,7 @@ def detect_and_run(job: dict) -> dict:
     # adds one, every pipeline would silently look permanently drifted and all of
     # them would be started daily - so fail loudly on a mismatch instead.
     expected = set(source_actions())
-    if expected and set(head) != expected:
+    if not head_is_complete(head, expected):
         raise RuntimeError(
             f"Probe pipeline {probe_pipeline} resolved source actions {sorted(head)}, "
             f"but this module is configured for {sorted(expected)}. AFT's source action "

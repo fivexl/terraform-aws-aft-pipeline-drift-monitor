@@ -57,13 +57,24 @@ variable "dry_run" {
 }
 
 variable "max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single drift check or weekly full run. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. The full run selects oldest-execution-first, so a cap below your account count rotates rather than starving the same accounts."
+  description = "Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control."
   type        = number
   default     = 20
 
   validation {
     condition     = var.max_pipelines_per_run >= 1 && floor(var.max_pipelines_per_run) == var.max_pipelines_per_run
     error_message = "max_pipelines_per_run must be a whole number of at least 1."
+  }
+}
+
+variable "full_run_max_pipelines_per_run" {
+  description = "Maximum number of AFT pipelines to start in a single weekly full run. Defaults to max_pipelines_per_run, but the two are independent: the daily drift check only has to start pipelines that actually drifted, while the full run starts every account regardless, so the same cap can be too low to cover the whole estate weekly. The full run selects oldest-execution-first, so a cap below your account count rotates through every account over successive weeks rather than starving the same accounts - set this at or above your account count if you want every account re-applied every week. Set to -1 to reuse max_pipelines_per_run (the default)."
+  type        = number
+  default     = -1
+
+  validation {
+    condition     = var.full_run_max_pipelines_per_run == -1 || (var.full_run_max_pipelines_per_run >= 1 && floor(var.full_run_max_pipelines_per_run) == var.full_run_max_pipelines_per_run)
+    error_message = "full_run_max_pipelines_per_run must be -1 (use max_pipelines_per_run) or a whole number of at least 1."
   }
 }
 

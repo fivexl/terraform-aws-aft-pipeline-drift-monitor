@@ -120,7 +120,7 @@ def test_renamed_source_action_fails_loudly(monkeypatch, cp, sns):
 
 def test_guard_checks_one_real_aft_pipeline(cp):
     """The check has to read AFT's side, not the probe's mirror of our own config."""
-    drift_detector.lambda_handler(probe_job(cp), None)
+    drift_detector.lambda_handler(job_event(), None)
 
     assert cp.described == [CURRENT]
 
@@ -132,7 +132,7 @@ def test_source_action_renamed_on_the_aft_side_fails_loudly(cp, sns):
         "aft-account-customizations-v2",
     ]
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert f"AFT pipeline {CURRENT} is configured with source actions" in result["error"]
     assert "aft-account-customizations-v2" in result["error"]
@@ -148,7 +148,7 @@ def test_source_action_added_on_the_aft_side_fails_loudly(cp):
         "aft-account-provisioning-customizations",
     ]
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert "aft-account-provisioning-customizations" in result["error"]
     assert cp.started == []
@@ -159,7 +159,7 @@ def test_guard_is_skipped_when_no_aft_pipelines_exist(cp):
     for name in [n for n in cp.pipelines if n.endswith("-customizations-pipeline")]:
         del cp.pipelines[name]
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert cp.described == []
     assert result["pipelines_checked"] == 0
@@ -192,7 +192,7 @@ def test_unreported_job_success_alerts_without_changing_the_result(cp, sns):
     """A dropped success callback leaves the action hanging, so it must be alerted."""
     cp.job_result_errors = True
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     # The work stands: pipelines were started and the summary is returned as usual.
     assert cp.started == STARTED
@@ -210,7 +210,7 @@ def test_unreported_job_success_alert_failure_does_not_break_the_result(cp, sns)
     cp.job_result_errors = True
     sns.fail = True
 
-    result = drift_detector.lambda_handler(probe_job(cp), None)
+    result = drift_detector.lambda_handler(job_event(), None)
 
     assert result["started"] == STARTED
     assert sns.messages == []

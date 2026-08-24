@@ -90,11 +90,19 @@ The full run skips pipelines with an execution already in flight: those pipeline
 run in `SUPERSEDED` mode, so a second execution would queue behind the running one
 and then supersede it, achieving nothing the in-flight run is not already doing.
 
-It obeys the same `max_pipelines_per_run` cap and `dry_run` flag as the drift
-check, and selects **oldest last execution first** — so a cap below your account
-count rotates through every account over successive weeks instead of starting the
-same lexicographically-first accounts forever. Keep the cap at or above your
-account count if you want every account re-applied every week.
+It obeys `dry_run` the same way the drift check does, and selects **oldest last
+execution first** — so a cap below your account count rotates through every
+account over successive weeks instead of starting the same lexicographically-first
+accounts forever.
+
+The full run has its own cap, `full_run_max_pipelines_per_run`, independent of the
+drift check's `max_pipelines_per_run`. They default to the same value, but the two
+answer different questions: the drift check only has to start pipelines that
+actually drifted, while the full run starts every account regardless, so the same
+cap that comfortably covers daily drift can leave the full run needing several
+weeks to reach every account (at the default of 20, a 50-account organisation
+takes about three weeks per full sweep). Set `full_run_max_pipelines_per_run` at
+or above your account count if you want every account re-applied every week.
 
 ## How HEAD is resolved
 
@@ -377,6 +385,7 @@ week (several CodeBuild actions each).
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation. | `bool` | `false` | no |
 | <a name="input_enable_chatbot"></a> [enable\_chatbot](#input\_enable\_chatbot) | Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack\_workspace\_id. | `bool` | `false` | no |
 | <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. | `string` | `"-customizations-pipeline"` | no |
+| <a name="input_full_run_max_pipelines_per_run"></a> [full\_run\_max\_pipelines\_per\_run](#input\_full\_run\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single weekly full run. Defaults to max\_pipelines\_per\_run, but the two are independent: the daily drift check only has to start pipelines that actually drifted, while the full run starts every account regardless, so the same cap can be too low to cover the whole estate weekly. The full run selects oldest-execution-first, so a cap below your account count rotates through every account over successive weeks rather than starving the same accounts - set this at or above your account count if you want every account re-applied every week. Set to -1 to reuse max\_pipelines\_per\_run (the default). | `number` | `-1` | no |
 | <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report\_schedule\_expression, so Monday's report describes a full run that is still in flight. | `string` | `"cron(0 6 ? * MON *)"` | no |
 | <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_kms_key_arn"></a> [kms\_key\_arn](#input\_kms\_key\_arn) | ARN of an existing KMS key used for the SNS topic and the probe pipeline's artifacts. Leave empty to have the module create one. A supplied key must allow events.amazonaws.com to kms:Decrypt and kms:GenerateDataKey*, otherwise EventBridge cannot publish the failure notifications. | `string` | `""` | no |
@@ -384,7 +393,7 @@ week (several CodeBuild actions each).
 | <a name="input_lambda_memory_size"></a> [lambda\_memory\_size](#input\_lambda\_memory\_size) | Memory in MB for all three Lambda functions. | `number` | `512` | no |
 | <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Python log level for all three Lambda functions. | `string` | `"INFO"` | no |
 | <a name="input_log_retention_in_days"></a> [log\_retention\_in\_days](#input\_log\_retention\_in\_days) | CloudWatch Logs retention for all three Lambda functions. | `number` | `30` | no |
-| <a name="input_max_pipelines_per_run"></a> [max\_pipelines\_per\_run](#input\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single drift check or weekly full run. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. The full run selects oldest-execution-first, so a cap below your account count rotates rather than starving the same accounts. | `number` | `20` | no |
+| <a name="input_max_pipelines_per_run"></a> [max\_pipelines\_per\_run](#input\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control. | `number` | `20` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name created by this module. | `string` | `"aft-pipeline-drift-monitor"` | no |
 | <a name="input_notify_on_drift"></a> [notify\_on\_drift](#input\_notify\_on\_drift) | Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the weekly full run summary, nor the EventBridge failure alerts, which are always published. | `bool` | `true` | no |
 | <a name="input_pipeline_name_pattern"></a> [pipeline\_name\_pattern](#input\_pipeline\_name\_pattern) | Python regular expression the Lambdas use to select AFT customizations pipelines. The default matches AFT's own naming, `<account-id>-customizations-pipeline`. | `string` | `"^\\d{12}-customizations-pipeline$"` | no |

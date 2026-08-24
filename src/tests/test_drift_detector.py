@@ -104,7 +104,10 @@ def test_one_unstartable_pipeline_does_not_abort_the_others(cp, sns):
 
 
 def test_renamed_source_action_fails_loudly(monkeypatch, cp, sns):
-    """A silent rename would mark every pipeline drifted and start them all."""
+    """A silent rename would mark every pipeline drifted and start them all.
+
+    Here the module's own SOURCE_ACTIONS is the side that no longer matches AFT.
+    """
     monkeypatch.setenv("SOURCE_ACTIONS", "aft-global-customizations,aft-renamed")
 
     result = drift_detector.lambda_handler(job_event(), None)
@@ -113,6 +116,54 @@ def test_renamed_source_action_fails_loudly(monkeypatch, cp, sns):
     assert cp.started == []
     assert cp.job_results == [("job-1", "failure")]
     assert sns.messages == []
+
+
+def test_guard_checks_one_real_aft_pipeline(cp):
+    """The check has to read AFT's side, not the probe's mirror of our own config."""
+    drift_detector.lambda_handler(probe_job(cp), None)
+
+    assert cp.described == [CURRENT]
+
+
+def test_source_action_renamed_on_the_aft_side_fails_loudly(cp, sns):
+    """AFT renames a source action: the probe cannot see it, GetPipeline can."""
+    cp.source_action_names[CURRENT] = [
+        "aft-global-customizations",
+        "aft-account-customizations-v2",
+    ]
+
+    result = drift_detector.lambda_handler(probe_job(cp), None)
+
+    assert f"AFT pipeline {CURRENT} is configured with source actions" in result["error"]
+    assert "aft-account-customizations-v2" in result["error"]
+    assert cp.started == []
+    assert cp.job_results == [("job-1", "failure")]
+    assert sns.messages == []
+
+
+def test_source_action_added_on_the_aft_side_fails_loudly(cp):
+    cp.source_action_names[CURRENT] = [
+        "aft-global-customizations",
+        "aft-account-customizations",
+        "aft-account-provisioning-customizations",
+    ]
+
+    result = drift_detector.lambda_handler(probe_job(cp), None)
+
+    assert "aft-account-provisioning-customizations" in result["error"]
+    assert cp.started == []
+
+
+def test_guard_is_skipped_when_no_aft_pipelines_exist(cp):
+    """Nothing to compare against, and nothing to start either."""
+    for name in [n for n in cp.pipelines if n.endswith("-customizations-pipeline")]:
+        del cp.pipelines[name]
+
+    result = drift_detector.lambda_handler(probe_job(cp), None)
+
+    assert cp.described == []
+    assert result["pipelines_checked"] == 0
+    assert cp.job_results == [("job-1", "success")]
 
 
 def test_publish_failure_does_not_fail_the_job(cp, sns):

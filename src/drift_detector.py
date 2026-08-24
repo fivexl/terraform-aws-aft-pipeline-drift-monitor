@@ -20,9 +20,9 @@ import boto3
 
 from aft_pipelines import (
     DEFAULT_PIPELINE_PATTERN,
+    aft_pipeline_source_actions,
     configure_logging,
     env_flag,
-    head_is_complete,
     head_revisions,
     list_aft_pipelines,
     pipeline_status,
@@ -133,20 +133,12 @@ def detect_and_run(job: dict) -> dict:
             "Check the CodeConnections connection and the probe pipeline's source stage."
         )
 
-    # Drift is judged by comparing source action names. If AFT ever renames or
-    # adds one, every pipeline would silently look permanently drifted and all of
-    # them would be started daily - so fail loudly on a mismatch instead.
-    expected = set(source_actions())
-    if not head_is_complete(head, expected):
-        raise RuntimeError(
-            f"Probe pipeline {probe_pipeline} resolved source actions {sorted(head)}, "
-            f"but this module is configured for {sorted(expected)}. AFT's source action "
-            "names have changed; update the module before drift can be judged."
-        )
     logger.info("HEAD revisions: %s", {k: short(v) for k, v in head.items()})
 
     pipelines = list_aft_pipelines(codepipeline, pattern)
     logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
+
+    _assert_source_actions_unchanged(pipelines)
 
     drifted, skipped, failing = [], [], []
     for name in pipelines:
@@ -191,6 +183,34 @@ def detect_and_run(job: dict) -> dict:
         except Exception:
             logger.exception("Could not publish the drift check summary")
     return summary
+
+
+def _assert_source_actions_unchanged(pipelines: list[str]) -> None:
+    """Fail loudly if AFT's real source action names no longer match the module's.
+
+    Drift is judged per source action name, so a rename or an added source on
+    AFT's side makes every pipeline look permanently drifted and starts all of
+    them, every day, forever. This reads the names off a real AFT customizations
+    pipeline, because that is AFT's half of the contract - the probe pipeline
+    only mirrors this module's own configuration and cannot disagree with it.
+
+    One pipeline is enough: AFT generates every customizations pipeline from the
+    same template, so they share their source stage definition, and a per-run
+    GetPipeline call for each of them would only re-read the same answer.
+    """
+    expected = set(source_actions())
+    if not expected or not pipelines:
+        return
+    sample = pipelines[0]
+    actual = aft_pipeline_source_actions(codepipeline, sample)
+    if actual != expected:
+        raise RuntimeError(
+            f"AFT pipeline {sample} is configured with source actions {sorted(actual)}, "
+            f"but this module tracks {sorted(expected)}. AFT's source action names have "
+            "changed, so drift can no longer be judged: every pipeline would look "
+            "permanently behind HEAD and be restarted on every run. Update the module's "
+            "probe_sources to match AFT before re-enabling the drift check."
+        )
 
 
 def _subject(summary: dict, drifted: list, failing: list) -> str:

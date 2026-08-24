@@ -82,6 +82,55 @@ class FakeCodePipeline:
         #: Every pipeline name passed to an execution-history lookup, so a test
         #: can prove HEAD came from the job event rather than the probe's history.
         self.execution_lookups: list[str] = []
+        #: Source action names GetPipeline reports, per pipeline. Override an
+        #: entry to mimic AFT renaming or adding a source action.
+        self.source_action_names: dict[str, list[str]] = {}
+        #: Pipelines GetPipeline was called for, so tests can assert how many.
+        self.described: list[str] = []
+
+    # -- definition --------------------------------------------------------
+    def get_pipeline(self, name: str):
+        if name not in self.pipelines:
+            raise RuntimeError(f"PipelineNotFoundException: {name}")
+        self.described.append(name)
+        actions = self.source_action_names.get(name, [GLOBAL, ACCOUNT])
+        return {
+            "pipeline": {
+                "name": name,
+                "stages": [
+                    {
+                        "name": "Source",
+                        "actions": [
+                            {
+                                "name": action,
+                                "actionTypeId": {
+                                    "category": "Source",
+                                    "owner": "AWS",
+                                    "provider": "CodeStarSourceConnection",
+                                    "version": "1",
+                                },
+                                "outputArtifacts": [{"name": f"source-{action}"}],
+                            }
+                            for action in actions
+                        ],
+                    },
+                    {
+                        "name": "Apply-AFT-Global-Customizations",
+                        "actions": [
+                            {
+                                "name": "Apply-AFT-Global-Customizations",
+                                "actionTypeId": {
+                                    "category": "Build",
+                                    "owner": "AWS",
+                                    "provider": "CodeBuild",
+                                    "version": "1",
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        }
 
     # -- discovery ---------------------------------------------------------
     def get_paginator(self, operation: str):

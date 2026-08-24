@@ -83,6 +83,36 @@ def list_aft_pipelines(client: Any, pattern: str = DEFAULT_PIPELINE_PATTERN) -> 
     return sorted(names)
 
 
+def aft_pipeline_source_actions(client: Any, pipeline: str) -> set[str]:
+    """Read the source action names AFT actually configured on ``pipeline``.
+
+    This is the only source of truth for the action names drift is judged on.
+    Drift is decided by comparing per-action commit ids, keyed by source action
+    name, so if AFT ever renames a source action or adds a third one, every
+    pipeline's applied revisions stop matching HEAD's keys and all of them look
+    permanently drifted - which would start every pipeline, every day.
+
+    The probe pipeline this module creates cannot detect that: its own source
+    action names come from this module's Terraform (``local.probe_sources`` ->
+    ``SOURCE_ACTIONS``), so comparing the probe's resolved names against
+    ``source_actions()`` compares the module's configuration with itself.
+    ``GetPipeline`` on a real AFT customizations pipeline reads AFT's side of
+    the contract instead, which is the half that can actually change.
+
+    Actions are matched on ``actionTypeId.category == "Source"`` rather than on
+    the stage being called ``Source``, so a stage rename does not hide them, and
+    names go through :func:`canonical_action` for the same reason
+    :func:`revisions_from_summary` does.
+    """
+    definition = client.get_pipeline(name=pipeline)["pipeline"]
+    return {
+        canonical_action(action["name"])
+        for stage in definition.get("stages", [])
+        for action in stage.get("actions", [])
+        if action.get("name") and action.get("actionTypeId", {}).get("category") == "Source"
+    }
+
+
 def revisions_from_summary(summary: dict[str, Any]) -> dict[str, str]:
     """Extract ``{action_name: commit_id}`` from a pipeline execution summary."""
     return {

@@ -149,6 +149,14 @@ data "aws_iam_policy_document" "drift_detector" {
   }
 
   statement {
+    # Reads the source action names AFT actually configured, so a rename on
+    # AFT's side fails the check instead of marking every pipeline drifted.
+    sid       = "InspectAftPipelineDefinition"
+    actions   = ["codepipeline:GetPipeline"]
+    resources = [local.aft_customizations_pipeline_arn]
+  }
+
+  statement {
     sid       = "RunAftPipelines"
     actions   = ["codepipeline:StartPipelineExecution"]
     resources = [local.aft_customizations_pipeline_arn]

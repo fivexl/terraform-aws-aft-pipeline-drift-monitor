@@ -26,6 +26,28 @@ def test_list_aft_pipelines_matches_account_pipelines_only(cp):
     assert "aft-account-request" not in names
 
 
+def test_aft_pipeline_source_actions_reads_only_the_source_stage(cp):
+    """The guard's input: AFT's own configured source action names."""
+    assert aft_pipelines.aft_pipeline_source_actions(
+        cp, "111111111111-customizations-pipeline"
+    ) == {GLOBAL, ACCOUNT}
+    assert cp.described == ["111111111111-customizations-pipeline"]
+
+
+def test_aft_pipeline_source_actions_normalises_artifact_prefixed_names(cp):
+    cp.source_action_names["111111111111-customizations-pipeline"] = [f"source-{GLOBAL}"]
+    assert aft_pipelines.aft_pipeline_source_actions(
+        cp, "111111111111-customizations-pipeline"
+    ) == {GLOBAL}
+
+
+def test_aft_pipeline_source_actions_sees_an_added_source(cp):
+    cp.source_action_names["111111111111-customizations-pipeline"] = [GLOBAL, ACCOUNT, "aft-extra"]
+    assert aft_pipelines.aft_pipeline_source_actions(
+        cp, "111111111111-customizations-pipeline"
+    ) == {GLOBAL, ACCOUNT, "aft-extra"}
+
+
 def test_head_revisions_from_named_execution_normalises_artifact_names(cp):
     execution_id = cp.pipelines[PROBE][0]["pipelineExecutionId"]
     assert aft_pipelines.head_revisions(cp, PROBE, execution_id) == {

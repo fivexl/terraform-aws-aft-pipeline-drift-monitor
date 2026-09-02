@@ -17,11 +17,13 @@ from aft_pipelines import (
     ACTIVE_STATES,
     DEFAULT_PIPELINE_PATTERN,
     configure_logging,
+    head_is_complete,
     head_revisions,
     list_aft_pipelines,
     pipeline_status,
     publish,
     short,
+    source_actions,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,12 @@ def build_report() -> dict:
     ]
     return {
         "head_revisions": head,
+        # A probe execution read mid-flight can carry only one of the two source
+        # revisions. Drift judged against that half-HEAD reports pipelines as
+        # current on the action that is missing, so flag it and never claim
+        # currency below.
+        "head_complete": head_is_complete(head, set(source_actions())),
+        "pattern": pattern,
         "total": len(statuses),
         "failed": [s for s in statuses if s["status"] in FAILED_STATES],
         "running": [s for s in statuses if s["status"] in ACTIVE_STATES],
@@ -69,12 +77,26 @@ def build_report() -> dict:
 
 def _subject(report: dict) -> str:
     failed, drifted = len(report["failed"]), len(report["drifted"])
+    if not report["total"]:
+        # "all 0 pipelines current" reads as healthy; no pipelines matched at all.
+        return f"AFT pipeline report: no pipelines found matching {report['pattern']}"
     if not report["head_revisions"]:
         # Without HEAD nothing can be judged as current, so never say it is.
         return f"AFT pipeline report: HEAD unavailable, {failed} failed"
+    if not report["head_complete"]:
+        # Half a HEAD is not ground truth for drift either.
+        return f"AFT pipeline report: HEAD incomplete, {failed} failed"
     if failed or drifted:
         return f"AFT pipeline report: {failed} failed, {drifted} behind HEAD"
     return f"AFT pipeline report: all {report['total']} pipelines current"
+
+
+def _head_line(report: dict) -> str:
+    if not report["head_revisions"]:
+        return "HEAD revisions: unavailable (probe pipeline has not run)"
+    if not report["head_complete"]:
+        return "HEAD revisions: incomplete (probe resolved only some sources), drift not judged"
+    return "HEAD revisions:"
 
 
 def _format_message(report: dict) -> str:
@@ -82,7 +104,7 @@ def _format_message(report: dict) -> str:
     lines = [
         "AFT customizations pipeline status report",
         "",
-        "HEAD revisions:" if head else "HEAD revisions: unavailable (probe pipeline has not run)",
+        _head_line(report),
         *[f"  {action}: {short(revision)}" for action, revision in sorted(head.items())],
         "",
         f"Pipelines:     {report['total']}",

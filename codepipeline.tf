@@ -64,6 +64,13 @@ resource "aws_codepipeline" "revision_probe" {
       provider = "Lambda"
       version  = "1"
 
+      # The source stage's artifacts are consumed purely for their metadata:
+      # CodePipeline reports each one's resolved commit id in the job event as
+      # inputArtifacts[].revision, which is how the detector learns HEAD. AWS
+      # omits pipelineContext from Lambda action events, so without this wiring
+      # there is nothing in the event tying the invocation to its own execution.
+      input_artifacts = local.source_actions
+
       configuration = {
         FunctionName = module.drift_detector.lambda_function_name
       }

@@ -94,6 +94,10 @@ locals {
     LOG_LEVEL             = var.log_level
     ENABLE_CHATBOT        = tostring(var.enable_chatbot)
   }
+
+  # -1 means "reuse max_pipelines_per_run" - see the variable's description for why
+  # the two caps are independent.
+  full_run_max_pipelines_per_run = var.full_run_max_pipelines_per_run == -1 ? var.max_pipelines_per_run : var.full_run_max_pipelines_per_run
 }
 
 ########################################################################
@@ -146,6 +150,14 @@ data "aws_iam_policy_document" "drift_detector" {
     sid       = "ResolveHeadFromProbe"
     actions   = ["codepipeline:GetPipelineExecution"]
     resources = [local.probe_pipeline_arn]
+  }
+
+  statement {
+    # Reads the source action names AFT actually configured, so a rename on
+    # AFT's side fails the check instead of marking every pipeline drifted.
+    sid       = "InspectAftPipelineDefinition"
+    actions   = ["codepipeline:GetPipeline"]
+    resources = [local.aft_customizations_pipeline_arn]
   }
 
   statement {
@@ -276,7 +288,7 @@ module "full_run" {
 
   environment_variables = merge(local.lambda_environment, {
     DRY_RUN               = tostring(var.dry_run)
-    MAX_PIPELINES_PER_RUN = tostring(var.max_pipelines_per_run)
+    MAX_PIPELINES_PER_RUN = tostring(local.full_run_max_pipelines_per_run)
   })
 
   attach_policy_json = true

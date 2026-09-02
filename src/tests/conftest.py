@@ -42,6 +42,29 @@ def summary(status: str, global_rev: str, account_rev: str, minutes_ago: int = 0
     }
 
 
+def job_event(
+    global_rev: str = HEAD_GLOBAL, account_rev: str = HEAD_ACCOUNT, job_id: str = "job-1"
+) -> dict:
+    """Build the event AWS really sends a Lambda invoke action.
+
+    Deliberately has no ``pipelineContext`` key: the Lambda action event is
+    documented as "similar to GetJobDetails but without the actionTypeId and
+    pipelineContext data types", so the input artifacts' ``revision`` fields are
+    the only in-event source of the commits this execution resolved.
+    """
+    return {
+        "CodePipeline.job": {
+            "id": job_id,
+            "data": {
+                "inputArtifacts": [
+                    {"name": GLOBAL, "revision": global_rev},
+                    {"name": ACCOUNT, "revision": account_rev},
+                ]
+            },
+        }
+    }
+
+
 class FakeCodePipeline:
     """In-memory stand-in for the CodePipeline client."""
 
@@ -56,6 +79,58 @@ class FakeCodePipeline:
         self.start_errors: set[str] = set()
         #: Set to make the job-result calls raise.
         self.job_result_errors = False
+        #: Every pipeline name passed to an execution-history lookup, so a test
+        #: can prove HEAD came from the job event rather than the probe's history.
+        self.execution_lookups: list[str] = []
+        #: Source action names GetPipeline reports, per pipeline. Override an
+        #: entry to mimic AFT renaming or adding a source action.
+        self.source_action_names: dict[str, list[str]] = {}
+        #: Pipelines GetPipeline was called for, so tests can assert how many.
+        self.described: list[str] = []
+
+    # -- definition --------------------------------------------------------
+    def get_pipeline(self, name: str):
+        if name not in self.pipelines:
+            raise RuntimeError(f"PipelineNotFoundException: {name}")
+        self.described.append(name)
+        actions = self.source_action_names.get(name, [GLOBAL, ACCOUNT])
+        return {
+            "pipeline": {
+                "name": name,
+                "stages": [
+                    {
+                        "name": "Source",
+                        "actions": [
+                            {
+                                "name": action,
+                                "actionTypeId": {
+                                    "category": "Source",
+                                    "owner": "AWS",
+                                    "provider": "CodeStarSourceConnection",
+                                    "version": "1",
+                                },
+                                "outputArtifacts": [{"name": f"source-{action}"}],
+                            }
+                            for action in actions
+                        ],
+                    },
+                    {
+                        "name": "Apply-AFT-Global-Customizations",
+                        "actions": [
+                            {
+                                "name": "Apply-AFT-Global-Customizations",
+                                "actionTypeId": {
+                                    "category": "Build",
+                                    "owner": "AWS",
+                                    "provider": "CodeBuild",
+                                    "version": "1",
+                                },
+                            }
+                        ],
+                    },
+                ],
+            }
+        }
 
     # -- discovery ---------------------------------------------------------
     def get_paginator(self, operation: str):
@@ -70,9 +145,11 @@ class FakeCodePipeline:
 
     # -- executions --------------------------------------------------------
     def list_pipeline_executions(self, pipelineName: str, maxResults: int = 10):  # noqa: N803
+        self.execution_lookups.append(pipelineName)
         return {"pipelineExecutionSummaries": self.pipelines.get(pipelineName, [])[:maxResults]}
 
     def get_pipeline_execution(self, pipelineName: str, pipelineExecutionId: str):  # noqa: N803
+        self.execution_lookups.append(pipelineName)
         for item in self.pipelines.get(pipelineName, []):
             if item["pipelineExecutionId"] == pipelineExecutionId:
                 if self.hide_artifact_revisions:

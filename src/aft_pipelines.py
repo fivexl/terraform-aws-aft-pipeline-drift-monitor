@@ -14,10 +14,12 @@ These helpers answer two questions:
 
 HEAD comes from the *revision probe* pipeline that this module creates: it uses
 the same CodeConnections connection and the same repositories, so CodePipeline
-resolves HEAD from GitHub on our behalf and reports it in the execution's
-source revisions. There is no public CodeConnections API to read a commit from
-a connected repository, so borrowing CodePipeline's own resolution is the only
-way to learn HEAD without a separate GitHub credential.
+resolves HEAD from GitHub on our behalf. The drift detector reads it out of its
+own job event (``revisions_from_job_artifacts``); everything else that needs HEAD
+is not a CodePipeline action and reads the probe's latest execution instead
+(``head_revisions``). There is no public CodeConnections API to read a commit
+from a connected repository, so borrowing CodePipeline's own resolution is the
+only way to learn HEAD without a separate GitHub credential.
 """
 
 from __future__ import annotations
@@ -81,12 +83,63 @@ def list_aft_pipelines(client: Any, pattern: str = DEFAULT_PIPELINE_PATTERN) -> 
     return sorted(names)
 
 
+def aft_pipeline_source_actions(client: Any, pipeline: str) -> set[str]:
+    """Read the source action names AFT actually configured on ``pipeline``.
+
+    This is the only source of truth for the action names drift is judged on.
+    Drift is decided by comparing per-action commit ids, keyed by source action
+    name, so if AFT ever renames a source action or adds a third one, every
+    pipeline's applied revisions stop matching HEAD's keys and all of them look
+    permanently drifted - which would start every pipeline, every day.
+
+    The probe pipeline this module creates cannot detect that: its own source
+    action names come from this module's Terraform (``local.probe_sources`` ->
+    ``SOURCE_ACTIONS``), so comparing the probe's resolved names against
+    ``source_actions()`` compares the module's configuration with itself.
+    ``GetPipeline`` on a real AFT customizations pipeline reads AFT's side of
+    the contract instead, which is the half that can actually change.
+
+    Actions are matched on ``actionTypeId.category == "Source"`` rather than on
+    the stage being called ``Source``, so a stage rename does not hide them, and
+    names go through :func:`canonical_action` for the same reason
+    :func:`revisions_from_summary` does.
+    """
+    definition = client.get_pipeline(name=pipeline)["pipeline"]
+    return {
+        canonical_action(action["name"])
+        for stage in definition.get("stages", [])
+        for action in stage.get("actions", [])
+        if action.get("name") and action.get("actionTypeId", {}).get("category") == "Source"
+    }
+
+
 def revisions_from_summary(summary: dict[str, Any]) -> dict[str, str]:
     """Extract ``{action_name: commit_id}`` from a pipeline execution summary."""
     return {
         canonical_action(rev["actionName"]): rev["revisionId"]
         for rev in summary.get("sourceRevisions", [])
         if rev.get("actionName") and rev.get("revisionId")
+    }
+
+
+def revisions_from_job_artifacts(job: dict[str, Any]) -> dict[str, str]:
+    """Extract ``{action_name: commit_id}`` from a CodePipeline Lambda job event.
+
+    CodePipeline delivers every input artifact's resolved commit id in the job
+    event itself, as ``data.inputArtifacts[].revision`` - the GitHub commit id
+    for ``CodeStarSourceConnection`` sources. That makes the probe execution's
+    own HEAD readable without looking up any execution history, which matters
+    because the Lambda action event omits ``pipelineContext`` entirely, so there
+    is no execution id to look up. See
+    https://docs.aws.amazon.com/codepipeline/latest/userguide/action-reference-Lambda.html.
+
+    Returns ``{}`` when there is no job or its artifacts carry no revisions, so
+    callers can fall back to ``head_revisions``.
+    """
+    return {
+        canonical_action(artifact["name"]): artifact["revision"]
+        for artifact in job.get("data", {}).get("inputArtifacts", [])
+        if artifact.get("name") and artifact.get("revision")
     }
 
 
@@ -97,10 +150,12 @@ def executions(client: Any, pipeline: str, limit: int = 10) -> list[dict[str, An
 
 
 def head_revisions(client: Any, probe_pipeline: str, execution_id: str | None = None) -> dict[str, str]:
-    """Resolve HEAD per source action from the revision probe pipeline.
+    """Resolve HEAD per source action from the revision probe pipeline's history.
 
-    ``execution_id`` is the probe execution we are running inside; when omitted
-    (direct invocation) the most recent probe execution is used instead.
+    For callers that are *not* a CodePipeline action - the status report, the
+    weekly full run, and local/manual invocation - and so have no job event to
+    read revisions out of. ``execution_id`` pins a specific probe execution; when
+    omitted the most recent one that recorded revisions is used.
     """
     if execution_id:
         revisions = _execution_revisions(client, probe_pipeline, execution_id)
@@ -133,6 +188,18 @@ def _execution_revisions(client: Any, pipeline: str, execution_id: str) -> dict[
         for rev in execution.get("artifactRevisions", [])
         if rev.get("name") and rev.get("revisionId")
     }
+
+
+def head_is_complete(head: dict[str, str], expected: set[str]) -> bool:
+    """Whether ``head`` covers exactly the source actions the module tracks.
+
+    A probe execution inspected mid-flight can carry only *one* of the two source
+    revisions, and drift judged against half a HEAD is worse than none: pipelines
+    look current on the action that is missing. An empty ``expected`` means
+    SOURCE_ACTIONS is unset and there is nothing to validate against, so any
+    resolved head passes; an empty ``head`` never does.
+    """
+    return bool(head) and (not expected or set(head) == expected)
 
 
 def drifted_against(revisions: dict[str, str], head: dict[str, str]) -> bool:

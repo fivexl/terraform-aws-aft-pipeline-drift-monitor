@@ -2,9 +2,10 @@
 
 Invoked as a CodePipeline ``Lambda`` action from the revision probe pipeline
 this module creates: the probe's source stage resolves HEAD of both
-customizations repositories through the existing CodeConnections connection,
-then hands control here. Every AFT pipeline whose last successful execution
-used an older commit is started (unless ``DRY_RUN`` is set).
+customizations repositories through the existing CodeConnections connection and
+passes them on as input artifacts, whose ``revision`` fields carry the resolved
+commit ids straight to this handler. Every AFT pipeline whose last successful
+execution used an older commit is started (unless ``DRY_RUN`` is set).
 
 Pipeline failures are reported to SNS by an EventBridge rule, not from here.
 """
@@ -19,12 +20,14 @@ import boto3
 
 from aft_pipelines import (
     DEFAULT_PIPELINE_PATTERN,
+    aft_pipeline_source_actions,
     configure_logging,
     env_flag,
     head_revisions,
     list_aft_pipelines,
     pipeline_status,
     publish,
+    revisions_from_job_artifacts,
     short,
     source_actions,
     start_pipelines,
@@ -59,8 +62,24 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
             raise
         return {"error": str(exc)}
 
-    if job_id:
-        _report_job(job_id)
+    if job_id and not _report_job(job_id):
+        # The work is done, but CodePipeline was never told. The action now hangs
+        # until its own timeout, which no EventBridge failure rule reports in the
+        # meantime - so alert directly. Best effort: the result still stands.
+        try:
+            publish(
+                sns,
+                os.environ.get("SNS_TOPIC_ARN", ""),
+                "AFT drift check succeeded but CodePipeline was not notified",
+                "The AFT pipeline drift check completed successfully, but reporting "
+                f"success for CodePipeline job {job_id} failed.\n\n"
+                "The probe pipeline's Detect-Drift action is now unanswered and will "
+                "hang until its action timeout expires. Any drifted pipelines were "
+                "already started, so no drift check needs to be repeated - see the "
+                "Lambda logs for the underlying PutJobSuccessResult error.",
+            )
+        except Exception:
+            logger.exception("Could not publish the unreported job-success alert")
     return result
 
 
@@ -93,32 +112,33 @@ def detect_and_run(job: dict) -> dict:
     dry_run = env_flag("DRY_RUN")
     max_runs = int(os.environ.get("MAX_PIPELINES_PER_RUN", "20"))
 
-    context = job.get("data", {}).get("pipelineContext", {})
-    execution_id = (
-        context.get("pipelineExecutionId") if context.get("pipelineName") == probe_pipeline else None
-    )
-
-    head = head_revisions(codepipeline, probe_pipeline, execution_id)
+    # HEAD comes from the job event's input artifacts: CodePipeline stamps each
+    # one with the commit it resolved for this very execution. The event carries
+    # no pipelineContext (AWS omits it for Lambda actions), so there is no
+    # execution id to look up - and no need for one. head_revisions() remains the
+    # path for direct invocation, which has no job and therefore no artifacts.
+    head = revisions_from_job_artifacts(job)
+    if not head:
+        if job:
+            logger.warning(
+                "CodePipeline job carried no input artifact revisions; falling back to the "
+                "most recent %s execution. Check that the Detect-Drift action has "
+                "input_artifacts wired.",
+                probe_pipeline,
+            )
+        head = head_revisions(codepipeline, probe_pipeline)
     if not head:
         raise RuntimeError(
             f"Could not resolve HEAD revisions from probe pipeline {probe_pipeline}. "
             "Check the CodeConnections connection and the probe pipeline's source stage."
         )
 
-    # Drift is judged by comparing source action names. If AFT ever renames or
-    # adds one, every pipeline would silently look permanently drifted and all of
-    # them would be started daily - so fail loudly on a mismatch instead.
-    expected = set(source_actions())
-    if expected and set(head) != expected:
-        raise RuntimeError(
-            f"Probe pipeline {probe_pipeline} resolved source actions {sorted(head)}, "
-            f"but this module is configured for {sorted(expected)}. AFT's source action "
-            "names have changed; update the module before drift can be judged."
-        )
     logger.info("HEAD revisions: %s", {k: short(v) for k, v in head.items()})
 
     pipelines = list_aft_pipelines(codepipeline, pattern)
     logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
+
+    _assert_source_actions_unchanged(pipelines)
 
     drifted, skipped, failing = [], [], []
     for name in pipelines:
@@ -163,6 +183,34 @@ def detect_and_run(job: dict) -> dict:
         except Exception:
             logger.exception("Could not publish the drift check summary")
     return summary
+
+
+def _assert_source_actions_unchanged(pipelines: list[str]) -> None:
+    """Fail loudly if AFT's real source action names no longer match the module's.
+
+    Drift is judged per source action name, so a rename or an added source on
+    AFT's side makes every pipeline look permanently drifted and starts all of
+    them, every day, forever. This reads the names off a real AFT customizations
+    pipeline, because that is AFT's half of the contract - the probe pipeline
+    only mirrors this module's own configuration and cannot disagree with it.
+
+    One pipeline is enough: AFT generates every customizations pipeline from the
+    same template, so they share their source stage definition, and a per-run
+    GetPipeline call for each of them would only re-read the same answer.
+    """
+    expected = set(source_actions())
+    if not expected or not pipelines:
+        return
+    sample = pipelines[0]
+    actual = aft_pipeline_source_actions(codepipeline, sample)
+    if actual != expected:
+        raise RuntimeError(
+            f"AFT pipeline {sample} is configured with source actions {sorted(actual)}, "
+            f"but this module tracks {sorted(expected)}. AFT's source action names have "
+            "changed, so drift can no longer be judged: every pipeline would look "
+            "permanently behind HEAD and be restarted on every run. Update the module's "
+            "probe_sources to match AFT before re-enabling the drift check."
+        )
 
 
 def _subject(summary: dict, drifted: list, failing: list) -> str:

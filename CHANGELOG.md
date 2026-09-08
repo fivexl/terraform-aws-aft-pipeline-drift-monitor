@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `notify_status_report_when_clean` variable (default `false`) gating the
+  scheduled `status-report` Lambda's SNS publish: an all-current report with a
+  fully-resolved HEAD is now suppressed by default, so only an actionable
+  status report (a failure, drift, an unresolved/partial HEAD, or no matching
+  pipeline) is sent. Set it to `true` to keep the prior behaviour of a report
+  on every scheduled run.
+- `lambda_ignore_source_code_hash` variable (default `true`), passed through
+  to all three `terraform-aws-modules/lambda/aws` functions. Suppresses a
+  spurious plan/apply mismatch that can require a second `apply` on the first
+  run in a fresh working directory, caused by the module computing
+  `source_code_hash` from a packaged archive that does not exist yet at that
+  point. Real code changes still deploy regardless of this setting: this
+  module derives each function's `aws_lambda_function.filename` from the
+  content of `src/` on every plan, and that filename changing - not
+  `source_code_hash` - is what the AWS provider actually redeploys on.
+- `notify_full_run_when_clean` variable (default `false`), the same gate as
+  `notify_status_report_when_clean` applied to the weekly `full-run` Lambda:
+  when nothing was started and nothing failed to start (every pipeline was
+  already running, or there was simply nothing eligible), the SNS summary is
+  no longer published. A dry run, a failed start, or no matching pipeline
+  still always publishes.
+
 ## [1.0.0] - 2026-08-20
 
 ### Added

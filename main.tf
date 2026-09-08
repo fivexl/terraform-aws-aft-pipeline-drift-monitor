@@ -119,6 +119,14 @@ module "drift_detector" {
   source_path = local.lambda_source_path
   hash_extra  = "drift-detector"
 
+  # terraform-aws-modules/lambda/aws computes source_code_hash from fileexists() on
+  # the packaged archive. On the very first apply in a fresh working directory that
+  # archive does not exist yet when the hash is computed, which can make plan and
+  # apply disagree and require running apply twice. ignore_source_code_hash works
+  # around it by skipping that hash entirely; real code changes still redeploy via
+  # filename, which source_path derives from the content of src/ on every plan.
+  ignore_source_code_hash = var.lambda_ignore_source_code_hash
+
   environment_variables = merge(local.lambda_environment, {
     DRY_RUN               = tostring(var.dry_run)
     MAX_PIPELINES_PER_RUN = tostring(var.max_pipelines_per_run)
@@ -211,7 +219,13 @@ module "status_report" {
   source_path = local.lambda_source_path
   hash_extra  = "status-report"
 
-  environment_variables = local.lambda_environment
+  # See drift_detector's ignore_source_code_hash comment above - same module,
+  # same first-apply plan/apply mismatch, same fix.
+  ignore_source_code_hash = var.lambda_ignore_source_code_hash
+
+  environment_variables = merge(local.lambda_environment, {
+    NOTIFY_WHEN_CLEAN = tostring(var.notify_status_report_when_clean)
+  })
 
   attach_policy_json = true
   policy_json        = data.aws_iam_policy_document.status_report.json
@@ -286,9 +300,14 @@ module "full_run" {
   source_path = local.lambda_source_path
   hash_extra  = "full-run"
 
+  # See drift_detector's ignore_source_code_hash comment above - same module,
+  # same first-apply plan/apply mismatch, same fix.
+  ignore_source_code_hash = var.lambda_ignore_source_code_hash
+
   environment_variables = merge(local.lambda_environment, {
     DRY_RUN               = tostring(var.dry_run)
     MAX_PIPELINES_PER_RUN = tostring(local.full_run_max_pipelines_per_run)
+    NOTIFY_WHEN_CLEAN     = tostring(var.notify_full_run_when_clean)
   })
 
   attach_policy_json = true

@@ -17,6 +17,7 @@ from aft_pipelines import (
     ACTIVE_STATES,
     DEFAULT_PIPELINE_PATTERN,
     configure_logging,
+    env_flag,
     head_is_complete,
     head_revisions,
     list_aft_pipelines,
@@ -37,16 +38,30 @@ FAILED_STATES = frozenset({"Failed", "Stopped", "Cancelled"})
 
 
 def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
-    """Entry point. Builds the report and publishes it to SNS."""
+    """Entry point. Builds the report and, unless it is clean, publishes it to SNS."""
     report = build_report()
-    publish(
-        sns,
-        os.environ.get("SNS_TOPIC_ARN", ""),
-        _subject(report),
-        _format_message(report),
-    )
+    if env_flag("NOTIFY_WHEN_CLEAN") or _is_actionable(report):
+        publish(
+            sns,
+            os.environ.get("SNS_TOPIC_ARN", ""),
+            _subject(report),
+            _format_message(report),
+        )
     logger.info("Status report: %s", json.dumps(report, default=str))
     return report
+
+
+def _is_actionable(report: dict) -> bool:
+    """Whether the report contains something a human would want to act on.
+
+    A report is a non-event only when every pipeline is current and HEAD was
+    fully resolved - failures, drift, an unavailable or partial HEAD, and no
+    pipeline matching the configured pattern are all actionable and must never
+    be suppressed by NOTIFY_WHEN_CLEAN.
+    """
+    return bool(
+        not report["total"] or report["failed"] or report["drifted"] or not report["head_complete"]
+    )
 
 
 def build_report() -> dict:

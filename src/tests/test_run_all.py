@@ -84,3 +84,42 @@ def test_ignores_non_aft_pipelines(cp):
 
     assert "aft-account-request" not in cp.started
     assert not any(name.startswith("aft-pipeline-drift-monitor") for name in cp.started)
+
+
+def test_a_clean_run_is_not_published_by_default(cp, sns):
+    # Every AFT pipeline already has an execution in flight: nothing is
+    # eligible, nothing starts, nothing fails to start.
+    for name in list(cp.pipelines):
+        if name.endswith("-customizations-pipeline"):
+            cp.pipelines[name][0]["status"] = "InProgress"
+
+    summary = run_all.lambda_handler({}, None)
+
+    assert summary["started"] == []
+    assert summary["failed_to_start"] == []
+    assert summary["dry_run"] is False
+    # Nothing to act on, and NOTIFY_WHEN_CLEAN is unset: no SNS publish.
+    assert sns.messages == []
+
+
+def test_a_clean_run_is_published_when_notify_when_clean_is_set(monkeypatch, cp, sns):
+    monkeypatch.setenv("NOTIFY_WHEN_CLEAN", "true")
+    for name in list(cp.pipelines):
+        if name.endswith("-customizations-pipeline"):
+            cp.pipelines[name][0]["status"] = "InProgress"
+
+    summary = run_all.lambda_handler({}, None)
+
+    assert summary["started"] == []
+    assert sns.messages[0]["subject"] == "AFT weekly full run: started 0 of 5 pipeline(s)"
+
+
+def test_no_matching_pipelines_is_always_published(cp, sns):
+    for name in list(cp.pipelines):
+        if name.endswith("-customizations-pipeline"):
+            del cp.pipelines[name]
+
+    summary = run_all.lambda_handler({}, None)
+
+    assert summary["pipelines_found"] == 0
+    assert len(sns.messages) == 1

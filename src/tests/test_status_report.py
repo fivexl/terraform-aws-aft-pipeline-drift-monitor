@@ -35,7 +35,7 @@ def test_report_buckets_pipelines_by_outcome(sns):
     assert "Still running: 1" in message["message"]
 
 
-def test_all_clear_subject(cp, sns):
+def test_all_clear_is_not_published_by_default(cp, sns):
     head = cp.pipelines["111111111111-customizations-pipeline"]
     for name in list(cp.pipelines):
         if name.endswith("-customizations-pipeline"):
@@ -46,6 +46,21 @@ def test_all_clear_subject(cp, sns):
     assert report["failed"] == []
     assert report["drifted"] == []
     assert report["head_complete"] is True
+    # Nothing to act on, and NOTIFY_WHEN_CLEAN is unset: no SNS publish.
+    assert sns.messages == []
+
+
+def test_all_clear_is_published_when_notify_when_clean_is_set(monkeypatch, cp, sns):
+    monkeypatch.setenv("NOTIFY_WHEN_CLEAN", "true")
+    head = cp.pipelines["111111111111-customizations-pipeline"]
+    for name in list(cp.pipelines):
+        if name.endswith("-customizations-pipeline"):
+            cp.pipelines[name] = head
+
+    report = status_report.lambda_handler({}, None)
+
+    assert report["failed"] == []
+    assert report["drifted"] == []
     assert sns.messages[0]["subject"] == "AFT pipeline report: all 5 pipelines current"
 
 
@@ -104,3 +119,24 @@ def test_no_matching_pipelines_is_not_reported_as_all_current(cp, sns):
     assert sns.messages[0]["subject"] == (
         "AFT pipeline report: no pipelines found matching ^\\d{12}-customizations-pipeline$"
     )
+
+
+def test_a_failed_pipeline_is_always_published_regardless_of_notify_when_clean(sns):
+    # The default fixtures already have failed pipelines; NOTIFY_WHEN_CLEAN unset
+    # (the default) must never suppress an actionable report.
+    assert "NOTIFY_WHEN_CLEAN" not in status_report.os.environ
+
+    report = status_report.lambda_handler({}, None)
+
+    assert report["failed"]
+    assert len(sns.messages) == 1
+
+
+def test_an_incomplete_head_is_always_published_regardless_of_notify_when_clean(cp, sns):
+    probe = cp.pipelines[PROBE][0]
+    probe["sourceRevisions"] = [r for r in probe["sourceRevisions"] if r["actionName"] == GLOBAL]
+
+    report = status_report.lambda_handler({}, None)
+
+    assert report["head_complete"] is False
+    assert len(sns.messages) == 1

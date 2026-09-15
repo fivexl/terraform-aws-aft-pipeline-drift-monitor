@@ -44,14 +44,37 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
     """Entry point. Starts every idle AFT customizations pipeline."""
     summary = run_all()
     logger.info("Full run summary: %s", json.dumps(summary, default=str))
-    # A notification failure must not mask a run that started pipelines.
-    try:
-        publish(
-            sns, os.environ.get("SNS_TOPIC_ARN", ""), _subject(summary), _format_message(summary)
-        )
-    except Exception:
-        logger.exception("Could not publish the full run summary")
+    if env_flag("NOTIFY_WHEN_CLEAN") or _is_actionable(summary):
+        # A notification failure must not mask a run that started pipelines.
+        try:
+            publish(
+                sns,
+                os.environ.get("SNS_TOPIC_ARN", ""),
+                _subject(summary),
+                _format_message(summary),
+            )
+        except Exception:
+            logger.exception("Could not publish the full run summary")
     return summary
+
+
+def _is_actionable(summary: dict) -> bool:
+    """Whether the summary contains something a human would want to act on.
+
+    A summary is a non-event only when nothing was started and nothing failed
+    to start - every eligible pipeline was already running, and there was
+    nothing else to do. A dry run is always actionable regardless of outcome:
+    a human running one wants to see what a real run would have done, not
+    have that suppressed on the exact runs where nothing would have happened.
+    No pipeline matching the configured pattern is also always actionable - a
+    likely misconfiguration, not a clean run.
+    """
+    return bool(
+        summary["dry_run"]
+        or not summary["pipelines_found"]
+        or summary["started"]
+        or summary["failed_to_start"]
+    )
 
 
 def run_all() -> dict:

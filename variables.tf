@@ -79,9 +79,21 @@ variable "full_run_max_pipelines_per_run" {
 }
 
 variable "notify_on_drift" {
-  description = "Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the weekly full run summary, nor the EventBridge failure alerts, which are always published."
+  description = "Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the scheduled status report or the weekly full run summary, which have their own notification behaviour, nor the EventBridge failure alerts, which are always published."
   type        = bool
   default     = true
+}
+
+variable "notify_status_report_when_clean" {
+  description = "Publish the scheduled status report even when every pipeline is current - no failures and nothing behind HEAD. Defaults to false, so only an actionable report (something failed, or HEAD could not be resolved/was only partially resolved) is sent. Does not affect the drift check or the weekly full run summary, which have their own notification behaviour."
+  type        = bool
+  default     = false
+}
+
+variable "notify_full_run_when_clean" {
+  description = "Publish the weekly full run summary even when nothing was started and nothing failed to start - every pipeline was already running, or there was simply nothing eligible. Defaults to false, so only an actionable summary (something started, something failed to start, a dry run, or no matching pipeline) is sent. Does not affect the drift check or the scheduled status report, which have their own notification behaviour."
+  type        = bool
+  default     = false
 }
 
 variable "create_sns_topic" {
@@ -117,6 +129,12 @@ variable "python_runtime" {
   description = "Lambda Python runtime."
   type        = string
   default     = "python3.14"
+}
+
+variable "lambda_ignore_source_code_hash" {
+  description = "Passed straight through to terraform-aws-modules/lambda/aws for all three Lambda functions. Suppresses a spurious plan/apply mismatch on the first apply in a fresh working directory, where the deployment archive does not exist yet when the module computes source_code_hash. Real code changes are still deployed: this module's Lambda functions derive their aws_lambda_function.filename from the content of src/ on every plan, and that filename changing is what the AWS provider actually keys a redeploy on, independent of source_code_hash. Defaults to true, since there is no known downside to that in this module's configuration."
+  type        = bool
+  default     = true
 }
 
 variable "lambda_memory_size" {

@@ -64,7 +64,7 @@ Four signals, one SNS topic:
 
 | Signal | Source | When |
 |---|---|---|
-| Drift summary | `drift-detector` Lambda | Each drift check with something to report: stale, failing-on-HEAD or unstartable pipelines |
+| Drift summary | `drift-detector` Lambda | Each drift check with something to report: stale, failing-on-HEAD, already-running, quarantined, uninspectable or unstartable pipelines |
 | Failure alert | EventBridge → SNS directly, via an IAM role | Any pipeline ending in `failure_pipeline_name_suffix` fails, plus the revision probe itself |
 | Status report | `status-report` Lambda | On its own schedule, a few hours after the check |
 | Weekly full run | `full-run` Lambda | Weekly, after starting every pipeline |
@@ -147,15 +147,41 @@ as drifted, so a failure is retried on the next check. Two cases are deliberatel
 *reported but not restarted*:
 
 - an execution is `InProgress` or `Stopping` — the run under way will settle it
-- the newest execution already ran HEAD and did not succeed — another run would
-  only repeat the same failure, so it is listed as *failing on HEAD* instead
+- the newest execution **`Failed`** while already carrying HEAD — another run
+  would only repeat the same failure, so it is listed as *failing on HEAD*
+  instead. `Superseded`, `Stopped` and `Cancelled` do **not** count here: none of
+  them is evidence that HEAD cannot be applied, so those pipelines are retried.
 
 At most `max_pipelines_per_run` pipelines are started per check; the rest are
 deferred to the next run, which keeps CodeBuild concurrency and per-account
-Terraform state contention bounded. Drift is judged by source **action name**, so
-if AFT ever renames or adds one the detector fails loudly rather than marking
-every account drifted — set `SOURCE_ACTIONS` is compared against what the probe
-resolved.
+Terraform state contention bounded.
+
+Drift is judged by source **action name**, so if AFT renames or adds one, the
+affected pipeline can no longer be compared against HEAD at all — its applied
+revisions would never match HEAD's keys and it would look permanently behind,
+restarting on every run. Every pipeline's source actions are therefore read from
+its own definition (`GetPipeline`) on each check, and any pipeline that does not
+match exactly is **quarantined**: neither compared nor started, and reported. One
+hand-edited pipeline does not block the rest of the estate, and no incompatible
+pipeline is silently judged. A pipeline whose definition cannot be read is
+quarantined too — an unreadable definition is not evidence that it still matches.
+
+Drift is only judged against a **complete** HEAD. A probe execution inspected
+mid-flight can carry one of the two source revisions, and comparison iterates
+over the actions HEAD actually has — so a missing action would be treated as
+current on every account. The check fails instead.
+
+### When the check reports failure
+
+The drift detector processes every account first and only then decides the
+CodePipeline job's verdict. It reports the job as **failed** — so the probe
+pipeline goes `FAILED` and the failure alert fires — when any pipeline could not
+be started, could not be inspected, or was quarantined. Every other account is
+still remediated in the same run; only the verdict changes. `notify_on_drift`
+gates the informational drift summary and cannot suppress these.
+
+A pipeline that could not be inspected is excluded from that run's counts and
+retried on the next one, rather than costing the whole estate its check.
 
 ## Usage
 
@@ -292,7 +318,11 @@ aws lambda invoke \
   `/aft/config/vcs/codeconnections-connection-arn`,
   `/aft/config/{global,account}-customizations/repo-{name,branch}`.
 - Pipeline names follow AFT's convention. Override `pipeline_name_pattern` and
-  `failure_pipeline_name_suffix` together if yours differ.
+  `failure_pipeline_name_suffix` together if yours differ: the two select the
+  same pipelines from different angles (a regex the Lambdas match, and a suffix
+  that scopes their IAM permissions and the failure rule), so a precondition
+  rejects a plan where they disagree rather than letting it surface at runtime as
+  `AccessDenied` or as alerts that never arrive.
 - Instantiate the module with a provider aimed at the **AFT management account**,
   not the Control Tower management account. In a root module whose default
   provider targets Control Tower management, pass the AFT-account provider
@@ -404,7 +434,7 @@ week (several CodeBuild actions each).
 | <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It reads the last 10 executions of every AFT pipeline, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation. | `bool` | `false` | no |
 | <a name="input_enable_chatbot"></a> [enable\_chatbot](#input\_enable\_chatbot) | Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack\_workspace\_id. | `bool` | `false` | no |
-| <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. | `string` | `"-customizations-pipeline"` | no |
+| <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. An empty value is rejected: it would widen the IAM resource ARN and the EventBridge match to every CodePipeline in the account. | `string` | `"-customizations-pipeline"` | no |
 | <a name="input_full_run_max_pipelines_per_run"></a> [full\_run\_max\_pipelines\_per\_run](#input\_full\_run\_max\_pipelines\_per\_run) | Maximum number of AFT pipelines to start in a single weekly full run. Defaults to max\_pipelines\_per\_run, but the two are independent: the daily drift check only has to start pipelines that actually drifted, while the full run starts every account regardless, so the same cap can be too low to cover the whole estate weekly. The full run selects oldest-execution-first, so a cap below your account count rotates through every account over successive weeks rather than starving the same accounts - set this at or above your account count if you want every account re-applied every week. Set to -1 to reuse max\_pipelines\_per\_run (the default). | `number` | `-1` | no |
 | <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report\_schedule\_expression, so Monday's report describes a full run that is still in flight. | `string` | `"cron(0 6 ? * MON *)"` | no |
 | <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts. | `number` | `600` | no |

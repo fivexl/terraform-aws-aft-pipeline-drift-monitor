@@ -77,6 +77,11 @@ class FakeCodePipeline:
         self.hide_artifact_revisions = False
         #: Pipeline names whose start_pipeline_execution should raise.
         self.start_errors: set[str] = set()
+        #: Pipeline names whose execution history lookups should raise, to mimic a
+        #: deletion race or a throttled API call on one pipeline.
+        self.inspect_errors: set[str] = set()
+        #: Pipeline names whose get_pipeline should raise.
+        self.describe_errors: set[str] = set()
         #: Set to make the job-result calls raise.
         self.job_result_errors = False
         #: Every pipeline name passed to an execution-history lookup, so a test
@@ -90,6 +95,8 @@ class FakeCodePipeline:
 
     # -- definition --------------------------------------------------------
     def get_pipeline(self, name: str):
+        if name in self.describe_errors:
+            raise RuntimeError(f"ThrottlingException: {name}")
         if name not in self.pipelines:
             raise RuntimeError(f"PipelineNotFoundException: {name}")
         self.described.append(name)
@@ -145,6 +152,8 @@ class FakeCodePipeline:
 
     # -- executions --------------------------------------------------------
     def list_pipeline_executions(self, pipelineName: str, maxResults: int = 10):  # noqa: N803
+        if pipelineName in self.inspect_errors:
+            raise RuntimeError(f"PipelineNotFoundException: {pipelineName}")
         self.execution_lookups.append(pipelineName)
         return {"pipelineExecutionSummaries": self.pipelines.get(pipelineName, [])[:maxResults]}
 

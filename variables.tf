@@ -21,9 +21,19 @@ variable "pipeline_name_pattern" {
 }
 
 variable "failure_pipeline_name_suffix" {
-  description = "Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline_name_pattern - a wrong value causes AccessDenied, not just missing alerts."
+  description = "Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline_name_pattern - a wrong value causes AccessDenied, not just missing alerts. An empty value is rejected: it would widen the IAM resource ARN and the EventBridge match to every CodePipeline in the account."
   type        = string
   default     = "-customizations-pipeline"
+
+  validation {
+    condition     = length(var.failure_pipeline_name_suffix) > 0
+    error_message = "failure_pipeline_name_suffix must not be empty: an empty suffix widens the IAM pipeline ARN to arn:<partition>:codepipeline:*:<account>:* and makes the EventBridge failure rule match every pipeline in the account."
+  }
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._@-]+$", var.failure_pipeline_name_suffix))
+    error_message = "failure_pipeline_name_suffix must contain only the characters CodePipeline allows in a pipeline name: A-Z a-z 0-9 . _ @ and -."
+  }
 }
 
 variable "schedule_expression" {

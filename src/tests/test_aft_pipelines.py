@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import aft_pipelines
-from tests.conftest import ACCOUNT, GLOBAL, HEAD_ACCOUNT, HEAD_GLOBAL, OLD_GLOBAL, PROBE
+from tests.conftest import ACCOUNT, GLOBAL, HEAD_ACCOUNT, HEAD_GLOBAL, OLD_GLOBAL, PROBE, summary
 
 
 def test_canonical_action_strips_artifact_prefix():
@@ -118,6 +118,69 @@ def test_pipeline_status_judges_drift_against_last_success(cp):
     assert behind["drifted"] is True
     assert behind["no_success_found"] is True
     assert behind["failed_on_head"] is False
+
+
+def test_only_a_failed_newest_execution_suppresses_a_retry(cp):
+    """failed_on_head must not swallow Superseded, Stopped or Cancelled.
+
+    All three mean HEAD was never successfully applied - a superseded execution
+    was replaced by a newer one, and a stopped or cancelled one never finished -
+    so treating them as "already failed on HEAD" suppresses exactly the retry
+    that would bring the account up to date.
+    """
+    head = {GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}
+    name = "444444444444-customizations-pipeline"
+
+    for state, suppresses in (
+        ("Failed", True),
+        ("Superseded", False),
+        ("Stopped", False),
+        ("Cancelled", False),
+    ):
+        cp.pipelines[name] = [summary(state, HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=20)]
+        status = aft_pipelines.pipeline_status(cp, name, head)
+        assert status["drifted"] is True, state
+        assert status["failed_on_head"] is suppresses, state
+
+
+def test_validate_source_actions_checks_every_pipeline(cp):
+    """Item 6: sampling the first pipeline either blocked the estate or let a
+    later incompatible pipeline through unvalidated."""
+    names = sorted(n for n in cp.pipelines if n.endswith("-customizations-pipeline"))
+    # The outlier is deliberately NOT the first pipeline.
+    cp.source_action_names[names[-1]] = [GLOBAL, "aft-renamed"]
+
+    quarantined = aft_pipelines.validate_source_actions(cp, names, {GLOBAL, ACCOUNT})
+
+    assert list(quarantined) == [names[-1]]
+    assert "aft-renamed" in quarantined[names[-1]]
+    assert sorted(cp.described) == names
+
+
+def test_validate_source_actions_quarantines_an_unreadable_definition(cp):
+    names = ["111111111111-customizations-pipeline", "222222222222-customizations-pipeline"]
+    cp.describe_errors = {names[0]}
+
+    quarantined = aft_pipelines.validate_source_actions(cp, names, {GLOBAL, ACCOUNT})
+
+    assert "could not read its definition" in quarantined[names[0]]
+    assert names[1] not in quarantined
+
+
+def test_validate_source_actions_is_a_noop_without_tracked_actions(cp):
+    """SOURCE_ACTIONS unset means there is nothing to validate against."""
+    assert aft_pipelines.validate_source_actions(cp, ["111111111111-customizations-pipeline"], set()) == {}
+    assert cp.described == []
+
+
+def test_inspect_pipelines_isolates_a_failure_to_its_own_pipeline(cp):
+    names = sorted(n for n in cp.pipelines if n.endswith("-customizations-pipeline"))
+    cp.inspect_errors = {names[0]}
+
+    statuses, errors = aft_pipelines.inspect_pipelines(cp, names, {})
+
+    assert [s["pipeline"] for s in statuses] == names[1:]
+    assert errors == [{"pipeline": names[0], "error": f"PipelineNotFoundException: {names[0]}"}]
 
 
 def test_publish_is_a_noop_without_a_topic(sns):

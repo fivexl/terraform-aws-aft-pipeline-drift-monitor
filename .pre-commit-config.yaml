@@ -9,10 +9,6 @@ repos:
     hooks:
       - id: terraform_fmt
       - id: terraform_validate
-        # examples/ references the published registry module, which does not
-        # exist until the first release is tagged. Drop this exclude after v1.0.0
-        # is on the Terraform Registry.
-        exclude: ^examples/
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.5
     hooks:

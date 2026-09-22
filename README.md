@@ -163,8 +163,11 @@ Deploy into the **AFT management account**, in the **AFT home region**.
 
 ```hcl
 module "aft_pipeline_drift_monitor" {
-  source  = "fivexl/aft-pipeline-drift-monitor/aws"
-  version = "~> 1.0"
+  # Not on the Terraform Registry yet - this module has no git tag, so a
+  # `version` constraint resolves to nothing. Pin a commit until the first
+  # release is published, then switch to
+  # `source = "fivexl/aft-pipeline-drift-monitor/aws"` with `version = "~> 1.0"`.
+  source = "git::https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor.git?ref=<commit-sha>"
 
   schedule_expression          = "cron(0 2 * * ? *)"    # find and re-run stale pipelines
   report_schedule_expression   = "cron(0 8 * * ? *)"    # report on what they did
@@ -277,6 +280,11 @@ aws lambda invoke \
 
 ## Requirements and assumptions
 
+- **AFT >= 1.21.0.** The module reads
+  `/aft/config/vcs/codeconnections-connection-arn`, which AFT introduced in
+  [1.13.4](https://github.com/aws-ia/terraform-aws-control_tower_account_factory/releases/tag/1.13.4)
+  when it migrated from CodeStar Connections to CodeConnections. 1.21.0 is the
+  floor this module is supported against; older installations are out of scope.
 - AFT uses a CodeConnections-backed provider (GitHub, GitHub Enterprise Server,
   GitLab or Bitbucket). CodeCommit-based AFT installations resolve revisions
   differently and are **not** supported.
@@ -285,6 +293,18 @@ aws lambda invoke \
   `/aft/config/{global,account}-customizations/repo-{name,branch}`.
 - Pipeline names follow AFT's convention. Override `pipeline_name_pattern` and
   `failure_pipeline_name_suffix` together if yours differ.
+- Instantiate the module with a provider aimed at the **AFT management account**,
+  not the Control Tower management account. In a root module whose default
+  provider targets Control Tower management, pass the AFT-account provider
+  explicitly - otherwise the module reads the wrong SSM parameters and tries to
+  create its resources in the wrong account.
+
+## Releases
+
+There is **no tagged release yet**, so nothing is on the Terraform Registry and
+`version = "~> 1.0"` resolves to nothing. Consume the module from git, pinning a
+commit, until the first tag is published. The changelog keeps every note under
+`Unreleased` for the same reason.
 
 ## Costs
 

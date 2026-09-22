@@ -7,18 +7,31 @@ on:
   pull_request:
     branches: [ main ]
 
+# Read-only by default. A job that needs more asks for it explicitly, so a
+# compromised action in the graph cannot write to the repository.
+permissions:
+  contents: read
+
 jobs:
+  # Reusable workflows are pinned to a commit SHA, not @main: a mutable ref means
+  # CI can change under a PR that did not touch it, and the workflow runs with
+  # this repository's token. This is fivexl/github-reusable-workflows main as of
+  # 2026-07-06. Bump it deliberately - Dependabot's github-actions ecosystem
+  # tracks it and will open the PR.
+  #
+  # Note the 1.0.0 tag is OLDER than this commit, so pinning to the tag would be
+  # an unverified behaviour change rather than a stabilisation.
   python-job:
-    uses: fivexl/github-reusable-workflows/.github/workflows/python-job.yml@main
+    uses: fivexl/github-reusable-workflows/.github/workflows/python-job.yml@f234ee717d5e5c56a314d8f4f701d3c85259b4e3
     with:
       python-version: "3.14"
       aws-default-region: "eu-central-1"
       working-directory: "src"
 
   terraform-job:
-    uses: fivexl/github-reusable-workflows/.github/workflows/terraform-job.yml@main
+    uses: fivexl/github-reusable-workflows/.github/workflows/terraform-job.yml@f234ee717d5e5c56a314d8f4f701d3c85259b4e3
     with:
-      terraform-version: "1.9.0"
+      terraform-version: "1.6.1"
       aws-default-region: "eu-central-1"
 
   # The reusable workflow's fmt and validate jobs run inside
@@ -29,7 +42,7 @@ jobs:
     name: validate on the declared minimum Terraform
     runs-on: ubuntu-latest
     container:
-      image: hashicorp/terraform:1.9.0
+      image: hashicorp/terraform:1.6.1
     steps:
       - uses: actions/checkout@v4
       - run: terraform init -backend=false

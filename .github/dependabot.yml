@@ -1,0 +1,42 @@
+version: 2
+
+updates:
+  # The reusable workflows in base.yml are pinned to a commit SHA, which only a
+  # bot is going to keep current. This is what makes that pin maintainable rather
+  # than a slow drift into an unpatched action.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+
+  - package-ecosystem: terraform
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    labels:
+      - dependencies
+
+  - package-ecosystem: terraform
+    directory: /examples/basic
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    labels:
+      - dependencies
+
+  # src/requirements.txt - the Lambda runtime dependencies.
+  - package-ecosystem: pip
+    directory: /src
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    labels:
+      - dependencies

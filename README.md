@@ -349,8 +349,19 @@ publisher through their identity policies:
 }
 ```
 
-To name principals individually instead, they are the three Lambda execution
-roles and the `pipeline_failed_target_role_arn` output.
+To name principals individually instead, read them off the
+`notification_publisher_role_arns` output — a map of every role this module
+publishes with, keyed by what it is:
+
+```
+drift_detector          = the drift check's Lambda execution role
+status_report           = the status report's Lambda execution role
+full_run                = the weekly full run's Lambda execution role
+pipeline_failed_events  = the role EventBridge assumes for failure alerts
+```
+
+The `kms_key_arn` output names the key those publishers decrypt with, so the
+topic owner does not have to guess that either.
 
 One limitation: a cross-account topic that is **encrypted with a CMK** is not
 supported. Every publisher would need `kms:GenerateDataKey*` and `kms:Decrypt` on
@@ -371,6 +382,33 @@ aws codepipeline start-pipeline-execution \
 aws lambda invoke \
   --function-name "$(terraform output -raw full_run_function_name)" /dev/stdout
 ```
+
+## Audit and encryption
+
+Two controls are off by default because turning them on requires something the
+module must not invent on your behalf. Both matter if your AFT deployment has
+CloudTrail S3 data events disabled or mandates CMK encryption for logs.
+
+**Object-level audit for the artifact bucket.** The probe pipeline's bucket holds
+zipped copies of the customizations repositories. With AFT's S3 data events off,
+reads of those archives are recorded nowhere. Set `artifact_access_log_bucket`
+(and optionally `artifact_access_log_prefix`) to deliver S3 server access logs to
+a bucket you already own — typically the central log-archive destination. It is
+not the default because logging a bucket needs a second *permanent* bucket, and
+creating one for a bucket that only holds ephemeral zips is not a decision this
+module should make. The alternative is a scoped CloudTrail S3 data-event selector
+on this one bucket.
+
+**CMK-encrypted Lambda log groups.** The three log groups get retention from
+`log_retention_in_days` and, by default, CloudWatch Logs' own AWS-managed
+encryption. Pass `cloudwatch_logs_kms_key_id` to use a customer-managed key
+instead — the same one the AFT deployment already uses for CloudWatch Logs.
+
+Note this is **not** `kms_key_arn`. That key encrypts the SNS topic and the
+artifact bucket; a CloudWatch Logs key needs a different policy (`logs.<region>.amazonaws.com`
+granted `kms:Encrypt*`/`Decrypt*`/`ReEncrypt*`/`GenerateDataKey*`/`Describe*`,
+scoped with a `kms:EncryptionContext:aws:logs:arn` condition), so the two are
+deliberately separate inputs rather than one reused key.
 
 ## Requirements and assumptions
 
@@ -441,7 +479,7 @@ instead of being spread out.
 
 | Name | Version |
 |------|---------|
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.6.1 |
 | <a name="requirement_aws"></a> [aws](#requirement\_aws) | >= 6.28 |
 
 ## Modules
@@ -478,13 +516,14 @@ instead of being spread out.
 | [aws_kms_key.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/kms_key) | resource |
 | [aws_s3_bucket.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket) | resource |
 | [aws_s3_bucket_lifecycle_configuration.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_lifecycle_configuration) | resource |
+| [aws_s3_bucket_logging.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_logging) | resource |
 | [aws_s3_bucket_policy.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_policy) | resource |
 | [aws_s3_bucket_public_access_block.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_public_access_block) | resource |
 | [aws_s3_bucket_server_side_encryption_configuration.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_server_side_encryption_configuration) | resource |
 | [aws_s3_bucket_versioning.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/s3_bucket_versioning) | resource |
 | [aws_sns_topic.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic) | resource |
 | [aws_sns_topic_policy.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/sns_topic_policy) | resource |
-| [terraform_data.aft_version_floor](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
+| [terraform_data.preflight](https://registry.terraform.io/providers/hashicorp/terraform/latest/docs/resources/data) | resource |
 | [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
 | [aws_iam_policy_document.artifacts](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.chatbot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
@@ -512,16 +551,19 @@ instead of being spread out.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| <a name="input_artifact_access_log_bucket"></a> [artifact\_access\_log\_bucket](#input\_artifact\_access\_log\_bucket) | Name of an existing bucket to deliver S3 server access logs for the probe pipeline's artifact bucket to - typically the central log-archive destination. Leave empty for no access logging, which is the default because logging a bucket needs a second permanent bucket that this module should not create for you. Set it when the AFT deployment disables S3 data events in CloudTrail and you still want an object-level audit trail for reads of the customization source archives. The destination bucket must be in the same region and grant s3:PutObject to logging.s3.amazonaws.com for this source bucket. | `string` | `""` | no |
+| <a name="input_artifact_access_log_prefix"></a> [artifact\_access\_log\_prefix](#input\_artifact\_access\_log\_prefix) | Key prefix for the delivered access logs. Ignored when artifact\_access\_log\_bucket is empty. Defaults to the artifact bucket's own name plus a slash, so one destination bucket can serve several sources without their logs interleaving. | `string` | `""` | no |
 | <a name="input_artifact_bucket_name"></a> [artifact\_bucket\_name](#input\_artifact\_bucket\_name) | Name of the S3 bucket for the revision probe pipeline's artifacts. Leave empty to derive it from name\_prefix and the account id. | `string` | `""` | no |
 | <a name="input_artifact_retention_days"></a> [artifact\_retention\_days](#input\_artifact\_retention\_days) | Days before probe pipeline artifacts expire. They are only used to resolve commit ids, so they have no value after the run. Non-current versions expire one day later, so total retention is this plus one. | `number` | `7` | no |
 | <a name="input_chatbot_guardrail_policy_arns"></a> [chatbot\_guardrail\_policy\_arns](#input\_chatbot\_guardrail\_policy\_arns) | IAM policy ARNs applied as channel guardrails, capping what anyone can do through the channel. AWS applies AdministratorAccess when this is empty, so the default here is read-only instead. | `list(string)` | <pre>[<br/>  "arn:aws:iam::aws:policy/ReadOnlyAccess"<br/>]</pre> | no |
 | <a name="input_chatbot_iam_role_arn"></a> [chatbot\_iam\_role\_arn](#input\_chatbot\_iam\_role\_arn) | ARN of an existing role for Chatbot to assume. Leave empty to have the module create a read-only one. | `string` | `""` | no |
 | <a name="input_chatbot_logging_level"></a> [chatbot\_logging\_level](#input\_chatbot\_logging\_level) | CloudWatch logging level for the Chatbot configuration: ERROR, INFO or NONE. ERROR is the default because NONE hides a message Chatbot rejects (e.g. wrong format) with nothing logged anywhere. | `string` | `"ERROR"` | no |
-| <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn. | `bool` | `true` | no |
+| <a name="input_cloudwatch_logs_kms_key_id"></a> [cloudwatch\_logs\_kms\_key\_id](#input\_cloudwatch\_logs\_kms\_key\_id) | ARN of a KMS key to encrypt the three Lambda functions' CloudWatch log groups with. Leave empty to use CloudWatch Logs' own AWS-managed encryption. Pass the same customer-managed key the AFT deployment uses for CloudWatch Logs if your controls require CMK encryption there. The key policy must allow logs.<region>.amazonaws.com to kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey* and kms:Describe*, scoped with a kms:EncryptionContext:aws:logs:arn condition - note this is NOT kms\_key\_arn, which encrypts the SNS topic and the artifact bucket and is not reusable here, because a CloudWatch Logs key needs a different policy. | `string` | `""` | no |
+| <a name="input_create_sns_topic"></a> [create\_sns\_topic](#input\_create\_sns\_topic) | Whether to create the notification topic. Ignored when sns\_topic\_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns\_topic\_arn; a plan with neither fails a precondition, because the module has to have somewhere to publish. | `bool` | `true` | no |
 | <a name="input_detect_changes"></a> [detect\_changes](#input\_detect\_changes) | Whether the revision probe pipeline also triggers on pushes to the customizations repositories, in addition to the daily schedule. Requires the CodeConnections connection to be able to create a webhook. | `bool` | `true` | no |
 | <a name="input_drift_detector_timeout"></a> [drift\_detector\_timeout](#input\_drift\_detector\_timeout) | Timeout in seconds for the drift detector. It reads the last 10 executions of every AFT pipeline, so scale it with the number of vended accounts. | `number` | `600` | no |
 | <a name="input_dry_run"></a> [dry\_run](#input\_dry\_run) | Detect and report without invoking AFT's customizations state machine. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation. | `bool` | `false` | no |
-| <a name="input_enable_chatbot"></a> [enable\_chatbot](#input\_enable\_chatbot) | Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack\_workspace\_id. | `bool` | `false` | no |
+| <a name="input_enable_chatbot"></a> [enable\_chatbot](#input\_enable\_chatbot) | Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack\_workspace\_id. slack\_workspace\_id and slack\_channel\_id are both required when this is true, enforced by a precondition. | `bool` | `false` | no |
 | <a name="input_failure_pipeline_name_suffix"></a> [failure\_pipeline\_name\_suffix](#input\_failure\_pipeline\_name\_suffix) | Pipeline name suffix matched by the EventBridge failure rule, and used to scope the Lambdas' CodePipeline IAM permissions. Must be consistent with pipeline\_name\_pattern - a wrong value causes AccessDenied, not just missing alerts. An empty value is rejected: it would widen the IAM resource ARN and the EventBridge match to every CodePipeline in the account. | `string` | `"-customizations-pipeline"` | no |
 | <a name="input_full_run_schedule_expression"></a> [full\_run\_schedule\_expression](#input\_full\_run\_schedule\_expression) | Schedule for the weekly full run, which starts every AFT customizations pipeline regardless of drift. Defaults to Monday 06:00 UTC - after the daily drift check, and deliberately before report\_schedule\_expression, so Monday's report describes a full run that is still in flight. | `string` | `"cron(0 6 ? * MON *)"` | no |
 | <a name="input_full_run_timeout"></a> [full\_run\_timeout](#input\_full\_run\_timeout) | Timeout in seconds for the weekly full run Lambda. It makes one StartExecution call and inspects nothing, so it needs very little. | `number` | `60` | no |
@@ -557,6 +599,8 @@ instead of being spread out.
 | <a name="output_drift_detector_function_name"></a> [drift\_detector\_function\_name](#output\_drift\_detector\_function\_name) | Name of the drift detector Lambda function. |
 | <a name="output_full_run_function_arn"></a> [full\_run\_function\_arn](#output\_full\_run\_function\_arn) | ARN of the weekly full run Lambda function. |
 | <a name="output_full_run_function_name"></a> [full\_run\_function\_name](#output\_full\_run\_function\_name) | Name of the weekly full run Lambda function. |
+| <a name="output_kms_key_arn"></a> [kms\_key\_arn](#output\_kms\_key\_arn) | ARN of the key encrypting the notification topic and the probe pipeline's artifacts - either the one supplied via kms\_key\_arn or the one this module created. A cross-account topic owner needs this to know which key its publishers decrypt with. |
+| <a name="output_notification_publisher_role_arns"></a> [notification\_publisher\_role\_arns](#output\_notification\_publisher\_role\_arns) | Every principal this module publishes to the notification topic with, keyed by what it is. When sns\_topic\_arn points at a topic this module does not manage, its owner has to authorize exactly these - so they are output by name rather than left to be guessed from the generated role names or discovered as a runtime AccessDenied. Granting sns:Publish to this account covers all of them at once. |
 | <a name="output_pipeline_failed_rule_name"></a> [pipeline\_failed\_rule\_name](#output\_pipeline\_failed\_rule\_name) | Name of the EventBridge rule that forwards pipeline failures to SNS. |
 | <a name="output_pipeline_failed_target_role_arn"></a> [pipeline\_failed\_target\_role\_arn](#output\_pipeline\_failed\_target\_role\_arn) | Role EventBridge assumes to publish failure notifications. A topic in another account must allow this role (or this account) to sns:Publish. |
 | <a name="output_revision_probe_pipeline_arn"></a> [revision\_probe\_pipeline\_arn](#output\_revision\_probe\_pipeline\_arn) | ARN of the revision probe pipeline. |

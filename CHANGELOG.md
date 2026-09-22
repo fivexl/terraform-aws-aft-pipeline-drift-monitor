@@ -127,6 +127,54 @@ resolve.
   account id cannot be re-run through the state machine, so it is named in the
   summary and fails the check rather than being skipped silently.
 
+### Added
+
+- `notification_publisher_role_arns` output: a named map of every principal this
+  module publishes to the notification topic with - the three Lambda execution
+  roles and the EventBridge failure-alert role. `sns_topic_arn`'s own description
+  tells a cross-account topic owner to authorize exactly these, but only the
+  EventBridge role was output, so the rest had to be guessed from generated role
+  names, granted at account scope, or discovered as a runtime `AccessDenied`.
+- `kms_key_arn` output, so a cross-account topic owner can see which key the
+  publishers decrypt with.
+- `artifact_access_log_bucket` / `artifact_access_log_prefix`: opt-in S3 server
+  access logging for the probe pipeline's artifact bucket. Off by default because
+  logging a bucket requires a second permanent bucket this module should not
+  create for you; worth enabling where AFT's S3 data events are disabled and
+  reads of the customization source archives would otherwise be recorded nowhere.
+- `cloudwatch_logs_kms_key_id`: encrypts the three Lambda log groups with a
+  customer-managed key. Deliberately separate from `kms_key_arn`, which cannot be
+  reused - a CloudWatch Logs key needs a different key policy.
+- `.github/dependabot.yml` covering github-actions, Terraform (root and the
+  example) and pip. Terraform modules, Python tooling and Action upgrades were
+  entirely manual, and the SHA-pinned reusable workflows below are only
+  maintainable with a bot watching them.
+- `.tflint.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks. TFLint's AWS
+  ruleset validates ARN shapes and deprecated arguments against the real API,
+  which `terraform validate` does not look at.
+
+### Changed
+
+- **Terraform floor lowered from 1.9.0 to 1.6.1.** 1.9 was required solely
+  because two variable validations referenced other variables - `create_sns_topic`
+  reading `sns_topic_arn`, and `enable_chatbot` reading the two Slack ids. Both
+  are now resource preconditions, available since Terraform 1.2, which produce
+  the same plan-time failure. 1.6.1 is the floor of the management-AFT stacks
+  that consume this module, and CI validates on exactly that version.
+- IAM pipeline ARNs are scoped to the provider's region instead of every region.
+  All clients and resources operate in the AFT home region the module is deployed
+  into, so the wildcard only widened the grant to matching pipelines in every
+  other region of the account.
+- The reusable workflows in `base.yml` are pinned to a commit SHA rather than
+  `@main`, and the workflow declares `permissions: contents: read` at the top
+  level. A mutable ref meant CI could change under a PR that did not touch it,
+  while running with this repository's token. Note the upstream `1.0.0` tag is
+  *older* than the pinned commit, so pinning to the tag would have been an
+  unverified behaviour change rather than a stabilisation.
+- All three Lambda functions set `publish = false`. EventBridge and CodePipeline
+  invoke the unqualified function ARN, so publishing only accumulated immutable
+  versions with no alias and no version-qualified rollback path.
+
 ### Fixed
 
 - The drift detector now requires a **complete** HEAD before judging anything.
@@ -178,8 +226,9 @@ resolve.
 - Requires **AFT >= 1.21.0**. The module reads
   `/aft/config/vcs/codeconnections-connection-arn`, which AFT introduced in
   1.13.4 when it migrated from CodeStar Connections to CodeConnections, and
-  1.21.0 is the floor this module is supported against.
-- Requires Terraform **>= 1.9.0**: the `create_sns_topic` and `enable_chatbot`
-  validations reference other variables, which earlier versions do not allow.
+  invokes `aft-invoke-customizations` with `bypass_steps`, which is 1.21.0+.
+  Terraform reads `/aft/config/aft/version` and fails the plan below that floor.
+- Requires Terraform **>= 1.6.1**, verified by CI validating on exactly that
+  version.
 
 [Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/commits/main

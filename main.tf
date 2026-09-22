@@ -10,8 +10,16 @@ data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
 
+data "aws_region" "current" {}
+
 data "aws_ssm_parameter" "codeconnections_connection_arn" {
   name = "/aft/config/vcs/codeconnections-connection-arn"
+}
+
+# AFT's own version, which it publishes from 1.20.0 onward at least. Read purely
+# to assert the >= 1.21.0 floor below at plan time.
+data "aws_ssm_parameter" "aft_version" {
+  name = "/aft/config/aft/version"
 }
 
 data "aws_ssm_parameter" "global_customizations_repo_name" {
@@ -69,6 +77,25 @@ locals {
     local.probe_pipeline_arn,
   ]
 
+  # AFT creates this state machine with a fixed name in the AFT management
+  # account, in the AFT home region - the same account and region this module is
+  # deployed into, so it is derivable rather than an input.
+  aft_invoke_customizations_arn = "arn:${data.aws_partition.current.partition}:states:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:stateMachine:aft-invoke-customizations"
+
+  # `bypass_steps` requires AFT >= 1.21.0. Below that, the state machine's
+  # `Check Bypass` choice does not exist and every invocation falls through to
+  # `Invoke Provisioning Framework` - a DISTRIBUTED Map running the full
+  # provisioning framework per account, which is far heavier than the
+  # customizations re-run this module is asking for, and silently so. The check
+  # is fail-OPEN on an unparseable version string: it exists to catch a genuine
+  # 1.20.x install, not to block a version format AFT has not used yet.
+  aft_version       = nonsensitive(data.aws_ssm_parameter.aft_version.value)
+  aft_version_parts = try([for part in slice(split(".", local.aft_version), 0, 2) : tonumber(part)], [])
+  aft_version_too_old = length(local.aft_version_parts) == 2 && (
+    local.aft_version_parts[0] < 1 ||
+    (local.aft_version_parts[0] == 1 && local.aft_version_parts[1] < 21)
+  )
+
   lambda_source_path = [
     {
       path = "${path.module}/src"
@@ -87,17 +114,35 @@ locals {
   ]
 
   lambda_environment = {
-    PROBE_PIPELINE_NAME   = local.probe_pipeline_name
-    PIPELINE_NAME_PATTERN = var.pipeline_name_pattern
-    SNS_TOPIC_ARN         = local.sns_topic_arn
-    SOURCE_ACTIONS        = join(",", local.source_actions)
-    LOG_LEVEL             = var.log_level
-    ENABLE_CHATBOT        = tostring(var.enable_chatbot)
+    PROBE_PIPELINE_NAME          = local.probe_pipeline_name
+    PIPELINE_NAME_PATTERN        = var.pipeline_name_pattern
+    SNS_TOPIC_ARN                = local.sns_topic_arn
+    SOURCE_ACTIONS               = join(",", local.source_actions)
+    AFT_INVOKE_STATE_MACHINE_ARN = local.aft_invoke_customizations_arn
+    NAME_PREFIX                  = var.name_prefix
+    LOG_LEVEL                    = var.log_level
+    ENABLE_CHATBOT               = tostring(var.enable_chatbot)
   }
+}
 
-  # -1 means "reuse max_pipelines_per_run" - see the variable's description for why
-  # the two caps are independent.
-  full_run_max_pipelines_per_run = var.full_run_max_pipelines_per_run == -1 ? var.max_pipelines_per_run : var.full_run_max_pipelines_per_run
+########################################################################
+# AFT version floor
+#
+# The module invokes aft-invoke-customizations with `bypass_steps`, introduced in
+# AFT 1.21.0. Asserted here rather than at runtime: a Lambda discovering it at
+# 02:00 has already lost the check, and there is deliberately no fallback path -
+# see the aft_version_too_old local for what the fallback would actually do.
+########################################################################
+
+resource "terraform_data" "aft_version_floor" {
+  input = local.aft_version
+
+  lifecycle {
+    precondition {
+      condition     = !local.aft_version_too_old
+      error_message = "This module requires AFT >= 1.21.0, but /aft/config/aft/version reports ${local.aft_version}. It re-runs customizations through the aft-invoke-customizations state machine with bypass_steps = [\"provisioning_bootstrap\"], which AFT introduced in 1.21.0. On an older AFT the state machine has no Check Bypass state, so every invocation would instead run the FULL provisioning framework for every targeted account - far heavier than a customizations re-run, with no error to tell you. Upgrade AFT to 1.21.0 or later."
+    }
+  }
 }
 
 ########################################################################
@@ -128,9 +173,8 @@ module "drift_detector" {
   ignore_source_code_hash = var.lambda_ignore_source_code_hash
 
   environment_variables = merge(local.lambda_environment, {
-    DRY_RUN               = tostring(var.dry_run)
-    MAX_PIPELINES_PER_RUN = tostring(var.max_pipelines_per_run)
-    NOTIFY_ON_DRIFT       = tostring(var.notify_on_drift)
+    DRY_RUN         = tostring(var.dry_run)
+    NOTIFY_ON_DRIFT = tostring(var.notify_on_drift)
   })
 
   attach_policy_json = true
@@ -169,9 +213,12 @@ data "aws_iam_policy_document" "drift_detector" {
   }
 
   statement {
-    sid       = "RunAftPipelines"
-    actions   = ["codepipeline:StartPipelineExecution"]
-    resources = [local.aft_customizations_pipeline_arn]
+    # Re-running an account goes through AFT's own state machine, which owns the
+    # concurrency budget and the completion controls. That is why this role has
+    # no codepipeline:StartPipelineExecution: a direct start would bypass both.
+    sid       = "ReRunCustomizationsThroughAft"
+    actions   = ["states:StartExecution"]
+    resources = [local.aft_invoke_customizations_arn]
   }
 
   statement {
@@ -305,9 +352,8 @@ module "full_run" {
   ignore_source_code_hash = var.lambda_ignore_source_code_hash
 
   environment_variables = merge(local.lambda_environment, {
-    DRY_RUN               = tostring(var.dry_run)
-    MAX_PIPELINES_PER_RUN = tostring(local.full_run_max_pipelines_per_run)
-    NOTIFY_WHEN_CLEAN     = tostring(var.notify_full_run_when_clean)
+    DRY_RUN           = tostring(var.dry_run)
+    NOTIFY_WHEN_CLEAN = tostring(var.notify_full_run_when_clean)
   })
 
   attach_policy_json = true
@@ -331,18 +377,12 @@ module "full_run" {
 
 data "aws_iam_policy_document" "full_run" {
   statement {
-    sid       = "DiscoverPipelines"
-    actions   = ["codepipeline:ListPipelines"]
-    resources = ["*"] # ListPipelines does not support resource-level permissions
-  }
-
-  statement {
-    sid = "InspectAndRunAftPipelines"
-    actions = [
-      "codepipeline:ListPipelineExecutions",
-      "codepipeline:StartPipelineExecution",
-    ]
-    resources = [local.aft_customizations_pipeline_arn]
+    # The weekly run inspects nothing: it hands AFT a single {"type": "all"}
+    # selector and lets AFT resolve the account list from its metadata table, so
+    # this role needs no CodePipeline access at all.
+    sid       = "ReRunEveryAccountThroughAft"
+    actions   = ["states:StartExecution"]
+    resources = [local.aft_invoke_customizations_arn]
   }
 
   statement {

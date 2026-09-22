@@ -49,7 +49,7 @@ output "full_run_function_arn" {
 }
 
 output "weekly_full_run_rule_name" {
-  description = "Name of the EventBridge rule that runs every pipeline weekly."
+  description = "Name of the EventBridge rule that re-applies the customizations to every AFT-managed account weekly."
   value       = aws_cloudwatch_event_rule.weekly_full_run.name
 }
 

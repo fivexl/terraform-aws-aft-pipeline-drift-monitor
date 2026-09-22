@@ -18,8 +18,9 @@ resolve.
   customizations repositories through the existing AFT CodeConnections
   connection, on a daily schedule and (optionally) on every push.
 - `drift-detector` Lambda that compares every `<account-id>-customizations-pipeline`
-  against HEAD and starts the ones whose last successful execution is behind,
-  bounded by `max_pipelines_per_run` and skippable with `dry_run`.
+  against HEAD and re-runs the accounts whose last successful execution is
+  behind, through AFT's `aft-invoke-customizations` state machine. Skippable with
+  `dry_run`.
 - EventBridge rule forwarding AFT customizations pipeline failures straight to
   SNS with an input transformer.
 - `status-report` Lambda publishing failures, still-running and still-drifted
@@ -27,10 +28,9 @@ resolve.
 - Optional module-managed SNS topic via `create_sns_topic` (default `true`), or
   use an existing one via `sns_topic_arn`, which always takes precedence.
 - `full-run` Lambda on a weekly schedule (`full_run_schedule_expression`,
-  default Monday 06:00 UTC) that starts every AFT customizations pipeline
-  regardless of drift, skipping executions already in flight and selecting
-  oldest-execution-first so a capped run rotates through every account. Corrects
-  drift inside an account, which no commit comparison can detect.
+  default Monday 06:00 UTC) that re-applies the customizations to every
+  AFT-managed account regardless of drift. Corrects drift inside an account,
+  which no commit comparison can detect.
 - Customer-managed KMS key (or bring your own with `kms_key_arn`) encrypting both
   the SNS topic and the probe pipeline's artifacts. A CMK is required, not a
   preference: EventBridge cannot publish to a topic encrypted with the
@@ -71,6 +71,61 @@ resolve.
   already running, or there was simply nothing eligible), the SNS summary is
   no longer published. A dry run, a failed start, or no matching pipeline
   still always publishes.
+
+### Changed
+
+- **Customizations are re-run through AFT's own `aft-invoke-customizations`
+  state machine** instead of by calling `codepipeline:StartPipelineExecution`
+  directly. Both Lambdas now issue one `states:StartExecution` with
+  `bypass_steps = ["provisioning_bootstrap"]` - the drift check passing the
+  drifted account ids, the weekly full run passing `[{"type": "all"}]`. Direct
+  starts bypassed AFT's concurrency and completion controls, so a widespread
+  drift event could launch more Terraform than the AFT installation was
+  configured to handle. The state machine is a backpressure loop rather than a
+  cap: it starts what fits inside AFT's own
+  `maximum_concurrent_customizations` and waits 30s for the rest, indefinitely.
+- **Re-runs are idempotent.** The Step Functions execution name is derived from
+  the invocation's own id - the CodePipeline job id for the drift check, the
+  EventBridge event id for the weekly run, which was previously discarded - plus
+  a digest of the account set. A duplicate asynchronous delivery therefore hits
+  `ExecutionAlreadyExists` and starts nothing, while a retry that resolved a
+  different set of accounts is correctly treated as new work. No
+  `clientRequestToken` is needed.
+- **The weekly full run inspects nothing.** It no longer lists pipelines or reads
+  ten executions of each; `include: [{"type": "all"}]` makes "every account"
+  AFT's answer from its metadata table, which covers an account whose pipeline
+  `pipeline_name_pattern` would have missed and skips a pipeline AFT no longer
+  manages. Its IAM role has lost all CodePipeline permissions and
+  `full_run_timeout` now defaults to 60 seconds instead of 600.
+- Both Lambda roles trade `codepipeline:StartPipelineExecution` for
+  `states:StartExecution` on the `aft-invoke-customizations` state machine ARN,
+  scoped to the current region rather than every region.
+- The drift check's summary and SNS message now report the accounts handed to AFT
+  and the resulting execution ARN, in place of the pipelines started and deferred.
+
+### Removed
+
+- **`max_pipelines_per_run` and `full_run_max_pipelines_per_run`.** AFT's state
+  machine owns the concurrency budget, so a cap here could only be wrong: it
+  cannot see live executions, and slicing the candidate list before attempting
+  anything meant failed starts consumed the budget while healthy pipelines were
+  deferred (review item 5). Nothing is deferred to a later run any more, which
+  also removes the "a 50-account estate takes about three weeks per sweep"
+  caveat, and the oldest-execution-first rotation that existed only to work
+  around it.
+
+### Added
+
+- A plan-time AFT version floor. Terraform reads `/aft/config/aft/version` and
+  fails with an explicit message on AFT < 1.21.0, because `bypass_steps` is a
+  1.21.0 feature and an older state machine would silently fall through to
+  `Invoke Provisioning Framework` - running the full provisioning framework for
+  every targeted account instead of a customizations re-run. There is
+  deliberately no runtime fallback. The check is fail-open on a version string it
+  cannot parse.
+- Unresolvable-account reporting: a discovered pipeline whose name carries no
+  account id cannot be re-run through the state machine, so it is named in the
+  summary and fails the check rather than being skipped silently.
 
 ### Fixed
 

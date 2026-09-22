@@ -61,35 +61,13 @@ variable "detect_changes" {
 }
 
 variable "dry_run" {
-  description = "Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation."
+  description = "Detect and report without invoking AFT's customizations state machine. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation."
   type        = bool
   default     = false
 }
 
-variable "max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control."
-  type        = number
-  default     = 20
-
-  validation {
-    condition     = var.max_pipelines_per_run >= 1 && floor(var.max_pipelines_per_run) == var.max_pipelines_per_run
-    error_message = "max_pipelines_per_run must be a whole number of at least 1."
-  }
-}
-
-variable "full_run_max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single weekly full run. Defaults to max_pipelines_per_run, but the two are independent: the daily drift check only has to start pipelines that actually drifted, while the full run starts every account regardless, so the same cap can be too low to cover the whole estate weekly. The full run selects oldest-execution-first, so a cap below your account count rotates through every account over successive weeks rather than starving the same accounts - set this at or above your account count if you want every account re-applied every week. Set to -1 to reuse max_pipelines_per_run (the default)."
-  type        = number
-  default     = -1
-
-  validation {
-    condition     = var.full_run_max_pipelines_per_run == -1 || (var.full_run_max_pipelines_per_run >= 1 && floor(var.full_run_max_pipelines_per_run) == var.full_run_max_pipelines_per_run)
-    error_message = "full_run_max_pipelines_per_run must be -1 (use max_pipelines_per_run) or a whole number of at least 1."
-  }
-}
-
 variable "notify_on_drift" {
-  description = "Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the scheduled status report or the weekly full run summary, which have their own notification behaviour, nor the EventBridge failure alerts, which are always published."
+  description = "Publish an SNS summary for each drift check that found something to report - drifted, skipped, failing-on-HEAD, quarantined or uninspectable pipelines. Operational failures (a state machine invocation that did not land, a quarantined or uninspectable pipeline) are published regardless of this flag: it gates the informational summary, not failures. Does not affect the scheduled status report or the weekly full run summary, which have their own notification behaviour, nor the EventBridge failure alerts, which are always published."
   type        = bool
   default     = true
 }
@@ -101,7 +79,7 @@ variable "notify_status_report_when_clean" {
 }
 
 variable "notify_full_run_when_clean" {
-  description = "Publish the weekly full run summary even when nothing was started and nothing failed to start - every pipeline was already running, or there was simply nothing eligible. Defaults to false, so only an actionable summary (something started, something failed to start, a dry run, or no matching pipeline) is sent. Does not affect the drift check or the scheduled status report, which have their own notification behaviour."
+  description = "Publish the weekly full run summary even when the invocation was a duplicate of an earlier delivery of the same scheduled event, so nothing was started twice. Defaults to false, so only an actionable summary (a fresh invocation, a failed invocation, or a dry run) is sent. Does not affect the drift check or the scheduled status report, which have their own notification behaviour."
   type        = bool
   default     = false
 }
@@ -166,9 +144,9 @@ variable "status_report_timeout" {
 }
 
 variable "full_run_timeout" {
-  description = "Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts."
+  description = "Timeout in seconds for the weekly full run Lambda. It makes one StartExecution call and inspects nothing, so it needs very little."
   type        = number
-  default     = 600
+  default     = 60
 }
 
 variable "log_retention_in_days" {

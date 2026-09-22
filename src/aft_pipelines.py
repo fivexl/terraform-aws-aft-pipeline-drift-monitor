@@ -24,10 +24,12 @@ only way to learn HEAD without a separate GitHub credential.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+from collections.abc import Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -311,34 +313,142 @@ def _isoformat(value: Any) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-def start_pipelines(
-    client: Any, statuses: list[dict[str, Any]], max_runs: int, dry_run: bool = False
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Start up to ``max_runs`` pipelines, returning ``(started, deferred, failed)``.
+########################################################################
+# Re-invoking customizations through AFT's own state machine
+#
+# AFT orchestrates a customizations re-run with the `aft-invoke-customizations`
+# state machine, which this module hands the target accounts to instead of
+# calling StartPipelineExecution itself. Two things come with that, neither of
+# which a caller can reproduce from outside:
+#
+#   * Concurrency. The state machine is not a per-run cap but a backpressure
+#     loop: Get Pipeline Executions -> Below Maximum Execution Threshold? ->
+#     Execute Pipelines -> Wait 30s -> recheck, against AFT's own
+#     `maximum_concurrent_customizations`. It starts as many accounts as that
+#     budget allows and waits for the rest, indefinitely, so no cap of this
+#     module's own is needed and none can be more correct.
+#   * Completion. Direct starts bypass AFT's audit record and its own
+#     success/failure notifications entirely.
+#
+# Requires AFT >= 1.21.0 for `bypass_steps`. Terraform asserts that floor at plan
+# time; there is deliberately no runtime fallback, because without bypass_steps
+# the state machine's Check Bypass state falls through to a DISTRIBUTED Map that
+# runs the full provisioning framework for every account - far heavier than
+# anything this module is asking for, and silently so.
+########################################################################
 
-    Deferring rather than starting everything keeps CodeBuild concurrency and
-    per-account Terraform state contention bounded. A pipeline that cannot be
-    started is recorded and skipped, never allowed to abort the remaining ones.
+#: AFT creates the state machine with this fixed name (modules/aft-customizations).
+AFT_INVOKE_CUSTOMIZATIONS = "aft-invoke-customizations"
+
+#: Runs the customizations pipelines without re-running provisioning bootstrap.
+#: AFT 1.21.0+; the Check Bypass state that reads it uses JSONata and cannot be
+#: backported.
+BYPASS_PROVISIONING_BOOTSTRAP = "provisioning_bootstrap"
+
+#: Step Functions caps an execution name at 80 characters and rejects whitespace,
+#: control characters and the set <>{}[]?*"#%\^|~`$&,;:/ - so names are built from
+#: the safe subset only.
+_MAX_EXECUTION_NAME = 80
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]+")
+_LEADING_ACCOUNT_ID = re.compile(r"^(\d{12})")
+
+
+def account_id_from_pipeline(pipeline: str) -> str | None:
+    """The account id AFT named ``pipeline`` after, or None if it has none.
+
+    AFT names every customizations pipeline ``<account-id>-customizations-pipeline``,
+    so the target account is readable from the name with no extra API call. A
+    caller that overrode ``pipeline_name_pattern`` with a shape that does not
+    start with the account id gets None, and must report that pipeline rather
+    than guess: the state machine selects accounts, not pipelines.
     """
-    selected, deferred = statuses[:max_runs], statuses[max_runs:]
-    started: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    for status in selected:
-        name = status["pipeline"]
-        if dry_run:
-            logger.info("DRY_RUN: would start %s", name)
-            continue
-        try:
-            execution = client.start_pipeline_execution(name=name)
-        except Exception as exc:  # one deleted or conflicted pipeline must not abort the rest
-            logger.exception("Could not start %s", name)
-            status["start_error"] = str(exc)
-            failed.append(status)
-            continue
-        status["triggered_execution_id"] = execution.get("pipelineExecutionId")
-        started.append(status)
-        logger.info("Started %s (execution %s)", name, status["triggered_execution_id"])
-    return started, deferred, failed
+    match = _LEADING_ACCOUNT_ID.match(pipeline)
+    return match.group(1) if match else None
+
+
+def customizations_input(accounts: Sequence[str] | None = None) -> dict[str, Any]:
+    """Build the state machine's input for ``accounts``, or for every AFT account.
+
+    ``include`` is capped at 4 items by AFT's own request schema, so the account
+    list travels as ONE ``accounts`` selector rather than one selector each.
+    Passing no accounts selects ``all``, which resolves to every account in AFT's
+    metadata table - more accurate than this module's pipeline-name pattern, and
+    what the weekly full run wants.
+
+    ``get_execution_id`` is deliberately absent even though the schema requires
+    it: the state machine's first state injects it from ``$$.Execution.Name``,
+    and a caller-supplied value would be overwritten.
+    """
+    include: list[dict[str, Any]] = (
+        [{"type": "accounts", "target_value": sorted(accounts)}] if accounts else [{"type": "all"}]
+    )
+    return {"include": include, "bypass_steps": [BYPASS_PROVISIONING_BOOTSTRAP]}
+
+
+def execution_name(prefix: str, invocation_key: str, payload: dict[str, Any]) -> str:
+    """A deterministic execution name, which is what makes an invocation idempotent.
+
+    Lambda can deliver an asynchronous event more than once, including after a
+    successful run, so the same drift check can reach this module twice. Step
+    Functions rejects a second ``StartExecution`` under a name that already
+    exists, so deriving the name from the invocation's own id turns a duplicate
+    delivery into a no-op instead of a second re-run of every account.
+
+    The payload digest is part of the name on purpose: a retry that resolved a
+    *different* set of accounts is new work and must not be suppressed.
+    """
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
+    stem = _UNSAFE_NAME_CHARS.sub("-", f"{prefix}-{invocation_key}").strip("-")
+    return f"{stem[: _MAX_EXECUTION_NAME - len(digest) - 1]}-{digest}"
+
+
+def invoke_customizations(
+    client: Any, state_machine_arn: str, payload: dict[str, Any], name: str
+) -> dict[str, Any]:
+    """Start the state machine, treating a duplicate name as already invoked.
+
+    ``ExecutionAlreadyExists`` is the idempotency guarantee working, not a
+    failure: some earlier delivery of this same invocation already handed these
+    accounts to AFT.
+    """
+    logger.info("Invoking %s as %s with %s", state_machine_arn, name, json.dumps(payload))
+    try:
+        response = client.start_execution(
+            stateMachineArn=state_machine_arn, name=name, input=json.dumps(payload)
+        )
+    except Exception as exc:
+        if _error_code(exc) != "ExecutionAlreadyExists":
+            raise
+        logger.warning(
+            "Execution %s already exists - a duplicate delivery of this invocation, "
+            "so the accounts were already handed to AFT",
+            name,
+        )
+        return {
+            "execution_name": name,
+            "execution_arn": _execution_arn(state_machine_arn, name),
+            "already_invoked": True,
+        }
+    return {
+        "execution_name": name,
+        "execution_arn": response.get("executionArn"),
+        "already_invoked": False,
+    }
+
+
+def _error_code(exc: Exception) -> str:
+    """The AWS error code for ``exc``, falling back to its class name."""
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = response.get("Error", {}).get("Code")
+        if code:
+            return str(code)
+    return exc.__class__.__name__
+
+
+def _execution_arn(state_machine_arn: str, name: str) -> str:
+    """The execution ARN for ``name``, which StartExecution does not return on conflict."""
+    return f"{state_machine_arn.replace(':stateMachine:', ':execution:', 1)}:{name}"
 
 
 def chatbot_envelope(subject: str, message: str) -> str:

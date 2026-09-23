@@ -7,49 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing is released yet: this module has no git tag and is not published on the
-Terraform Registry. Every note below stays under `Unreleased` until the first
-tag exists, so the changelog never advertises a version a consumer cannot
-resolve.
-
 ### Added
 
-- Revision probe CodePipeline that resolves HEAD of the AFT global and account
-  customizations repositories through the existing AFT CodeConnections
-  connection, on a daily schedule and (optionally) on every push.
-- `drift-detector` Lambda that compares every `<account-id>-customizations-pipeline`
-  against HEAD and re-runs the accounts whose last successful execution is
-  behind, through AFT's `aft-invoke-customizations` state machine. Skippable with
-  `dry_run`.
-- EventBridge rule forwarding AFT customizations pipeline failures straight to
-  SNS with an input transformer.
-- `status-report` Lambda publishing failures, still-running and still-drifted
-  pipelines to the same SNS topic on its own schedule.
-- Optional module-managed SNS topic via `create_sns_topic` (default `true`), or
-  use an existing one via `sns_topic_arn`, which always takes precedence.
-- `full-run` Lambda on a weekly schedule (`full_run_schedule_expression`,
-  default Monday 06:00 UTC) that re-applies the customizations to every
-  AFT-managed account regardless of drift. Corrects drift inside an account,
-  which no commit comparison can detect.
-- Customer-managed KMS key (or bring your own with `kms_key_arn`) encrypting both
-  the SNS topic and the probe pipeline's artifacts. A CMK is required, not a
-  preference: EventBridge cannot publish to a topic encrypted with the
-  AWS-managed `alias/aws/sns` key.
-- Versioned S3 artifact bucket for the probe pipeline, with TLS-only access, all
-  public access blocked, and objects expiring after `artifact_retention_days`.
-- `detect_changes` (default `true`) so the probe pipeline also runs on every push
-  to a customizations repository, not only on the daily schedule.
-- `notify_on_drift` (default `true`) to control the per-check SNS summary.
-- The pipeline-failure EventBridge target publishes through an IAM role
-  (`pipeline_failed_target_role_arn`), so `sns_topic_arn` may name a topic in
-  another account. The roleless path authenticates as the
-  `events.amazonaws.com` service principal, which AWS only accepts for a topic
-  in the same account as the rule.
-- Optional Slack delivery through Amazon Q Developer in chat applications
-  (`enable_chatbot`), using the AWS provider's native
-  `aws_chatbot_slack_channel_configuration` so no extra provider is required.
-  Creates a read-only role for Chatbot and applies `ReadOnlyAccess` as the
-  channel guardrail rather than AWS's `AdministratorAccess` default.
+- A plan-time AFT version floor. Terraform reads `/aft/config/aft/version` and
+  fails with an explicit message on AFT < 1.21.0, because `bypass_steps` is a
+  1.21.0 feature and an older state machine would silently fall through to
+  `Invoke Provisioning Framework` - running the full provisioning framework for
+  every targeted account instead of a customizations re-run. There is
+  deliberately no runtime fallback. The check is fail-open on a version string it
+  cannot parse.
+- Unresolvable-account reporting: a discovered pipeline whose name carries no
+  account id cannot be re-run through the state machine, so it is named in the
+  summary and fails the check rather than being skipped silently.
 - `notify_status_report_when_clean` variable (default `false`) gating the
   scheduled `status-report` Lambda's SNS publish: an all-current report with a
   fully-resolved HEAD is now suppressed by default, so only an actionable
@@ -71,6 +40,29 @@ resolve.
   already running, or there was simply nothing eligible), the SNS summary is
   no longer published. A dry run, a failed start, or no matching pipeline
   still always publishes.
+- `notification_publisher_role_arns` output: a named map of every principal this
+  module publishes to the notification topic with - the three Lambda execution
+  roles and the EventBridge failure-alert role. `sns_topic_arn`'s own description
+  tells a cross-account topic owner to authorize exactly these, but only the
+  EventBridge role was output, so the rest had to be guessed from generated role
+  names, granted at account scope, or discovered as a runtime `AccessDenied`.
+- `kms_key_arn` output, so a cross-account topic owner can see which key the
+  publishers decrypt with.
+- `artifact_access_log_bucket` / `artifact_access_log_prefix`: opt-in S3 server
+  access logging for the probe pipeline's artifact bucket. Off by default because
+  logging a bucket requires a second permanent bucket this module should not
+  create for you; worth enabling where AFT's S3 data events are disabled and
+  reads of the customization source archives would otherwise be recorded nowhere.
+- `cloudwatch_logs_kms_key_id`: encrypts the three Lambda log groups with a
+  customer-managed key. Deliberately separate from `kms_key_arn`, which cannot be
+  reused - a CloudWatch Logs key needs a different key policy.
+- `.github/dependabot.yml` covering github-actions, Terraform (root and the
+  example) and pip. Terraform modules, Python tooling and Action upgrades were
+  entirely manual, and the SHA-pinned reusable workflows below are only
+  maintainable with a bot watching them.
+- `.tflint.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks. TFLint's AWS
+  ruleset validates ARN shapes and deprecated arguments against the real API,
+  which `terraform validate` does not look at.
 
 ### Changed
 
@@ -102,59 +94,6 @@ resolve.
   scoped to the current region rather than every region.
 - The drift check's summary and SNS message now report the accounts handed to AFT
   and the resulting execution ARN, in place of the pipelines started and deferred.
-
-### Removed
-
-- **`max_pipelines_per_run` and `full_run_max_pipelines_per_run`.** AFT's state
-  machine owns the concurrency budget, so a cap here could only be wrong: it
-  cannot see live executions, and slicing the candidate list before attempting
-  anything meant failed starts consumed the budget while healthy pipelines were
-  deferred (review item 5). Nothing is deferred to a later run any more, which
-  also removes the "a 50-account estate takes about three weeks per sweep"
-  caveat, and the oldest-execution-first rotation that existed only to work
-  around it.
-
-### Added
-
-- A plan-time AFT version floor. Terraform reads `/aft/config/aft/version` and
-  fails with an explicit message on AFT < 1.21.0, because `bypass_steps` is a
-  1.21.0 feature and an older state machine would silently fall through to
-  `Invoke Provisioning Framework` - running the full provisioning framework for
-  every targeted account instead of a customizations re-run. There is
-  deliberately no runtime fallback. The check is fail-open on a version string it
-  cannot parse.
-- Unresolvable-account reporting: a discovered pipeline whose name carries no
-  account id cannot be re-run through the state machine, so it is named in the
-  summary and fails the check rather than being skipped silently.
-
-### Added
-
-- `notification_publisher_role_arns` output: a named map of every principal this
-  module publishes to the notification topic with - the three Lambda execution
-  roles and the EventBridge failure-alert role. `sns_topic_arn`'s own description
-  tells a cross-account topic owner to authorize exactly these, but only the
-  EventBridge role was output, so the rest had to be guessed from generated role
-  names, granted at account scope, or discovered as a runtime `AccessDenied`.
-- `kms_key_arn` output, so a cross-account topic owner can see which key the
-  publishers decrypt with.
-- `artifact_access_log_bucket` / `artifact_access_log_prefix`: opt-in S3 server
-  access logging for the probe pipeline's artifact bucket. Off by default because
-  logging a bucket requires a second permanent bucket this module should not
-  create for you; worth enabling where AFT's S3 data events are disabled and
-  reads of the customization source archives would otherwise be recorded nowhere.
-- `cloudwatch_logs_kms_key_id`: encrypts the three Lambda log groups with a
-  customer-managed key. Deliberately separate from `kms_key_arn`, which cannot be
-  reused - a CloudWatch Logs key needs a different key policy.
-- `.github/dependabot.yml` covering github-actions, Terraform (root and the
-  example) and pip. Terraform modules, Python tooling and Action upgrades were
-  entirely manual, and the SHA-pinned reusable workflows below are only
-  maintainable with a bot watching them.
-- `.tflint.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks. TFLint's AWS
-  ruleset validates ARN shapes and deprecated arguments against the real API,
-  which `terraform validate` does not look at.
-
-### Changed
-
 - **Terraform floor lowered from 1.9.0 to 1.6.1.** 1.9 was required solely
   because two variable validations referenced other variables - `create_sns_topic`
   reading `sns_topic_arn`, and `enable_chatbot` reading the two Slack ids. Both
@@ -174,6 +113,17 @@ resolve.
 - All three Lambda functions set `publish = false`. EventBridge and CodePipeline
   invoke the unqualified function ARN, so publishing only accumulated immutable
   versions with no alias and no version-qualified rollback path.
+
+### Removed
+
+- **`max_pipelines_per_run` and `full_run_max_pipelines_per_run`.** AFT's state
+  machine owns the concurrency budget, so a cap here could only be wrong: it
+  cannot see live executions, and slicing the candidate list before attempting
+  anything meant failed starts consumed the budget while healthy pipelines were
+  deferred (review item 5). Nothing is deferred to a later run any more, which
+  also removes the "a 50-account estate takes about three weeks per sweep"
+  caveat, and the oldest-execution-first rotation that existed only to work
+  around it.
 
 ### Fixed
 
@@ -223,12 +173,62 @@ resolve.
 
 ### Notes
 
+- Requires **AFT >= 1.21.0**. On top of
+  `/aft/config/vcs/codeconnections-connection-arn`, the module now invokes
+  `aft-invoke-customizations` with `bypass_steps`, which is 1.21.0+. Terraform
+  reads `/aft/config/aft/version` and fails the plan below that floor.
+- Requires Terraform **>= 1.6.1**, down from 1.9.0, verified by CI validating on
+  exactly that version.
+
+## [1.0.0] - 2026-08-20
+
+### Added
+
+- Revision probe CodePipeline that resolves HEAD of the AFT global and account
+  customizations repositories through the existing AFT CodeConnections
+  connection, on a daily schedule and (optionally) on every push.
+- `drift-detector` Lambda that compares every `<account-id>-customizations-pipeline`
+  against HEAD and starts the ones whose last successful execution is behind,
+  bounded by `max_pipelines_per_run` and skippable with `dry_run`.
+- EventBridge rule forwarding AFT customizations pipeline failures straight to
+  SNS with an input transformer.
+- `status-report` Lambda publishing failures, still-running and still-drifted
+  pipelines to the same SNS topic on its own schedule.
+- Optional module-managed SNS topic via `create_sns_topic` (default `true`), or
+  use an existing one via `sns_topic_arn`, which always takes precedence.
+- `full-run` Lambda on a weekly schedule (`full_run_schedule_expression`,
+  default Monday 06:00 UTC) that starts every AFT customizations pipeline
+  regardless of drift, skipping executions already in flight and selecting
+  oldest-execution-first so a capped run rotates through every account. Corrects
+  drift inside an account, which no commit comparison can detect.
+- Customer-managed KMS key (or bring your own with `kms_key_arn`) encrypting both
+  the SNS topic and the probe pipeline's artifacts. A CMK is required, not a
+  preference: EventBridge cannot publish to a topic encrypted with the
+  AWS-managed `alias/aws/sns` key.
+- Versioned S3 artifact bucket for the probe pipeline, with TLS-only access, all
+  public access blocked, and objects expiring after `artifact_retention_days`.
+- `detect_changes` (default `true`) so the probe pipeline also runs on every push
+  to a customizations repository, not only on the daily schedule.
+- `notify_on_drift` (default `true`) to control the per-check SNS summary.
+- The pipeline-failure EventBridge target publishes through an IAM role
+  (`pipeline_failed_target_role_arn`), so `sns_topic_arn` may name a topic in
+  another account. The roleless path authenticates as the
+  `events.amazonaws.com` service principal, which AWS only accepts for a topic
+  in the same account as the rule.
+- Optional Slack delivery through Amazon Q Developer in chat applications
+  (`enable_chatbot`), using the AWS provider's native
+  `aws_chatbot_slack_channel_configuration` so no extra provider is required.
+  Creates a read-only role for Chatbot and applies `ReadOnlyAccess` as the
+  channel guardrail rather than AWS's `AdministratorAccess` default.
+
+### Notes
+
 - Requires **AFT >= 1.21.0**. The module reads
   `/aft/config/vcs/codeconnections-connection-arn`, which AFT introduced in
   1.13.4 when it migrated from CodeStar Connections to CodeConnections, and
-  invokes `aft-invoke-customizations` with `bypass_steps`, which is 1.21.0+.
-  Terraform reads `/aft/config/aft/version` and fails the plan below that floor.
-- Requires Terraform **>= 1.6.1**, verified by CI validating on exactly that
-  version.
+  1.21.0 is the floor this module is supported against.
+- Requires Terraform **>= 1.9.0**: the `create_sns_topic` and `enable_chatbot`
+  validations reference other variables, which earlier versions do not allow.
 
-[Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/commits/main
+[Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.0.0

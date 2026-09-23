@@ -7,14 +7,8 @@ provider "aws" {
 # reads AFT's own SSM parameters and inspects the customizations pipelines,
 # both of which live there.
 module "aft_pipeline_drift_monitor" {
-  # This module is not on the Terraform Registry yet: it has no git tag, so a
-  # `version` constraint would resolve to nothing. The relative source keeps the
-  # example initialisable - and validated in CI - until the first tag is
-  # published, at which point this becomes:
-  #
-  #   source  = "fivexl/aft-pipeline-drift-monitor/aws"
-  #   version = "~> 1.0"
-  source = "../.."
+  source  = "fivexl/aft-pipeline-drift-monitor/aws"
+  version = "~> 1.0"
 
   # Daily at 02:00 UTC: resolve HEAD and re-run every stale pipeline.
   schedule_expression = "cron(0 2 * * ? *)"

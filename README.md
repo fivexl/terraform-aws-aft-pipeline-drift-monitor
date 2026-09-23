@@ -484,9 +484,9 @@ instead of being spread out.
 
 | Name | Source | Version |
 |------|--------|---------|
-| <a name="module_drift_detector"></a> [drift\_detector](#module\_drift\_detector) | terraform-aws-modules/lambda/aws | 8.2.1 |
-| <a name="module_full_run"></a> [full\_run](#module\_full\_run) | terraform-aws-modules/lambda/aws | 8.2.1 |
-| <a name="module_status_report"></a> [status\_report](#module\_status\_report) | terraform-aws-modules/lambda/aws | 8.2.1 |
+| <a name="module_drift_detector"></a> [drift\_detector](#module\_drift\_detector) | terraform-aws-modules/lambda/aws | 8.8.2 |
+| <a name="module_full_run"></a> [full\_run](#module\_full\_run) | terraform-aws-modules/lambda/aws | 8.8.2 |
+| <a name="module_status_report"></a> [status\_report](#module\_status\_report) | terraform-aws-modules/lambda/aws | 8.8.2 |
 
 ## Resources
 

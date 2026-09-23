@@ -1,4 +1,4 @@
-"""Start every AFT customizations pipeline, drift or not.
+"""Re-apply the AFT customizations to every account, drift or not.
 
 Runs on its own weekly schedule. Where the drift detector is surgical - it only
 re-runs accounts whose last successful commit is behind HEAD - this is the
@@ -6,13 +6,27 @@ periodic baseline apply: it re-applies the customizations to every account, so
 manual console changes, out-of-band edits and anything else that has drifted in
 the *account* (rather than in the repository) gets corrected too.
 
-Pipelines with an execution already in flight are skipped: the pipelines run in
-SUPERSEDED mode, so a new execution would queue behind the running one and then
-supersede it, which achieves nothing that the in-flight run is not already doing.
+It does that by handing AFT's own ``aft-invoke-customizations`` state machine a
+single ``{"type": "all"}`` selector with
+``bypass_steps = ["provisioning_bootstrap"]``, which means this Lambda inspects
+nothing at all:
 
-When more pipelines are eligible than MAX_PIPELINES_PER_RUN allows, the ones
-whose last execution is oldest go first. Selecting by name instead would start
-the same lexicographically-first accounts every week and never reach the tail.
+* **"every account" is AFT's answer, not ours.** ``all`` resolves against AFT's
+  account metadata table, so it covers every AFT-managed account - including one
+  whose pipeline this module's ``pipeline_name_pattern`` would not have matched,
+  and excluding one whose pipeline exists but which AFT no longer manages.
+* **Concurrency is AFT's budget.** The state machine loops on
+  ``maximum_concurrent_customizations``, starting what fits and waiting 30s for
+  the rest, so there is no cap to configure here and no account left for a later
+  week.
+* **Already-running pipelines are AFT's problem too.** Its
+  ``Get Pipeline Executions`` state counts live executions before starting any,
+  which is what this Lambda used to approximate by reading ten executions of
+  every pipeline itself.
+
+One ``StartExecution`` per week, with a deterministic name derived from the
+EventBridge event id, so a duplicate delivery of the same scheduled event is a
+no-op rather than a second estate-wide apply.
 """
 
 from __future__ import annotations
@@ -20,32 +34,36 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 
 import boto3
 
 from aft_pipelines import (
-    DEFAULT_PIPELINE_PATTERN,
     configure_logging,
+    customizations_input,
     env_flag,
-    list_aft_pipelines,
-    pipeline_status,
+    execution_name,
+    invoke_customizations,
     publish,
-    start_pipelines,
 )
 
 logger = logging.getLogger(__name__)
 configure_logging()
 
-codepipeline = boto3.client("codepipeline")
+stepfunctions = boto3.client("stepfunctions")
 sns = boto3.client("sns")
 
 
 def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
-    """Entry point. Starts every idle AFT customizations pipeline."""
-    summary = run_all()
+    """Entry point. Hands every AFT account to the customizations state machine."""
+    # EventBridge stamps each scheduled event with a stable id, and Lambda may
+    # deliver the same event more than once. Carrying that id into the execution
+    # name is what makes a duplicate delivery idempotent - the old handler
+    # discarded it.
+    summary = run_all((event or {}).get("id"))
     logger.info("Full run summary: %s", json.dumps(summary, default=str))
     if env_flag("NOTIFY_WHEN_CLEAN") or _is_actionable(summary):
-        # A notification failure must not mask a run that started pipelines.
+        # A notification failure must not mask a run that invoked AFT.
         try:
             publish(
                 sns,
@@ -61,78 +79,89 @@ def lambda_handler(event, context):  # noqa: ARG001 - Lambda signature
 def _is_actionable(summary: dict) -> bool:
     """Whether the summary contains something a human would want to act on.
 
-    A summary is a non-event only when nothing was started and nothing failed
-    to start - every eligible pipeline was already running, and there was
-    nothing else to do. A dry run is always actionable regardless of outcome:
-    a human running one wants to see what a real run would have done, not
-    have that suppressed on the exact runs where nothing would have happened.
-    No pipeline matching the configured pattern is also always actionable - a
-    likely misconfiguration, not a clean run.
+    A fresh invocation is worth reporting: it names the execution someone can
+    follow. The one non-event is a duplicate delivery whose execution already
+    existed - nothing happened, by design. A dry run and a failed invocation are
+    always actionable.
     """
-    return bool(
-        summary["dry_run"]
-        or not summary["pipelines_found"]
-        or summary["started"]
-        or summary["failed_to_start"]
-    )
+    return bool(summary["dry_run"] or summary["invoke_error"] or not summary["already_invoked"])
 
 
-def run_all() -> dict:
-    """Start every AFT customizations pipeline that is not already running."""
-    pattern = os.environ.get("PIPELINE_NAME_PATTERN", DEFAULT_PIPELINE_PATTERN)
+def run_all(event_id: str | None = None) -> dict:
+    """Invoke the customizations state machine for every AFT-managed account."""
+    state_machine_arn = os.environ["AFT_INVOKE_STATE_MACHINE_ARN"]
+    name_prefix = os.environ.get("NAME_PREFIX", "aft-full-run")
     dry_run = env_flag("DRY_RUN")
-    max_runs = int(os.environ.get("MAX_PIPELINES_PER_RUN", "20"))
 
-    pipelines = list_aft_pipelines(codepipeline, pattern)
-    logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
+    payload = customizations_input()
+    key = event_id or f"manual-{uuid.uuid4().hex[:12]}"
+    if not event_id:
+        logger.info("No EventBridge event id; using one-off invocation key %s", key)
+    name = execution_name(name_prefix, key, payload)
 
-    # No HEAD comparison: an empty head means pipeline_status reports state and
-    # liveness only, which is all this Lambda needs.
-    statuses = [pipeline_status(codepipeline, name, {}) for name in pipelines]
-    skipped = [s for s in statuses if s["active"]]
-    # Oldest last execution first, so a cap below the account count rotates
-    # through every account over successive runs instead of starving the tail.
-    eligible = sorted(
-        (s for s in statuses if not s["active"]),
-        key=lambda s: (s["last_execution_at"] or "", s["pipeline"]),
-    )
+    if dry_run:
+        logger.info("DRY_RUN: would invoke %s as %s with %s", state_machine_arn, name, payload)
+        return {
+            "scope": "all AFT-managed accounts",
+            "execution_name": name,
+            "execution_arn": None,
+            "already_invoked": False,
+            "invoke_error": None,
+            "dry_run": True,
+        }
 
-    started, deferred, failed_to_start = start_pipelines(codepipeline, eligible, max_runs, dry_run)
+    invoke_error = None
+    invocation: dict = {"execution_name": name, "execution_arn": None, "already_invoked": False}
+    try:
+        invocation = invoke_customizations(stepfunctions, state_machine_arn, payload, name)
+    except Exception as exc:
+        logger.exception("Could not invoke %s", state_machine_arn)
+        invoke_error = str(exc)
 
     return {
-        "pipelines_found": len(pipelines),
-        "started": [s["pipeline"] for s in started],
-        "skipped_already_running": [s["pipeline"] for s in skipped],
-        "deferred_over_limit": [s["pipeline"] for s in deferred],
-        "failed_to_start": [s["pipeline"] for s in failed_to_start],
-        "dry_run": dry_run,
-        "eligible": [s["pipeline"] for s in eligible],
+        "scope": "all AFT-managed accounts",
+        **invocation,
+        "invoke_error": invoke_error,
+        "dry_run": False,
     }
 
 
 def _subject(summary: dict) -> str:
-    verb = "would start" if summary["dry_run"] else "started"
-    count = len(summary["eligible"]) - len(summary["deferred_over_limit"])
-    return f"AFT weekly full run: {verb} {count} of {summary['pipelines_found']} pipeline(s)"
+    if summary["invoke_error"]:
+        return "AFT weekly full run: could not invoke aft-invoke-customizations"
+    if summary["dry_run"]:
+        return "AFT weekly full run: would re-apply every AFT-managed account"
+    if summary["already_invoked"]:
+        return "AFT weekly full run: already invoked, nothing to do"
+    return "AFT weekly full run: re-applying every AFT-managed account"
 
 
 def _format_message(summary: dict) -> str:
-    count = len(summary["eligible"]) - len(summary["deferred_over_limit"])
     lines = [
-        "AFT customizations weekly full run - every pipeline, drift or not.",
+        "AFT customizations weekly full run - every account, drift or not.",
         "",
-        f"Pipelines found: {summary['pipelines_found']}",
-        f"{'Would start' if summary['dry_run'] else 'Started'}:    {count}",
-        f"Skipped (running): {len(summary['skipped_already_running'])}",
+        "Handed to AFT's aft-invoke-customizations state machine as a single",
+        'include: [{"type": "all"}] selector with',
+        'bypass_steps: ["provisioning_bootstrap"], so AFT resolves the account',
+        "list from its own metadata table and starts them within its",
+        "maximum_concurrent_customizations budget, waiting for the rest.",
+        "",
+        f"Execution name: {summary['execution_name']}",
     ]
-    for label, key in (
-        ("Started", "started"),
-        ("Skipped, already running", "skipped_already_running"),
-        ("Deferred to the next run (MAX_PIPELINES_PER_RUN reached)", "deferred_over_limit"),
-        ("Could not be started", "failed_to_start"),
-    ):
-        if summary[key]:
-            lines += ["", f"{label}:", *[f"  {name}" for name in summary[key]]]
+    if summary["execution_arn"]:
+        lines.append(f"Execution ARN:  {summary['execution_arn']}")
+    if summary["invoke_error"]:
+        lines += [
+            "",
+            "The state machine could not be invoked, so NOTHING was re-applied:",
+            f"  {summary['invoke_error']}",
+        ]
+    elif summary["already_invoked"]:
+        lines += [
+            "",
+            "That execution already existed, so this was a duplicate delivery of the",
+            "same scheduled event and nothing was started twice.",
+        ]
     if summary["dry_run"]:
-        lines += ["", "DRY_RUN is set: nothing was actually started."]
+        lines += ["", "DRY_RUN is set: AFT was not invoked."]
     return "\n".join(lines)

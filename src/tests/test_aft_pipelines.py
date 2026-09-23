@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import json
+import re
+
+import pytest
 
 import aft_pipelines
-from tests.conftest import ACCOUNT, GLOBAL, HEAD_ACCOUNT, HEAD_GLOBAL, OLD_GLOBAL, PROBE
+from tests.conftest import (
+    ACCOUNT,
+    GLOBAL,
+    HEAD_ACCOUNT,
+    HEAD_GLOBAL,
+    OLD_GLOBAL,
+    PROBE,
+    STATE_MACHINE_ARN,
+    summary,
+)
 
 
 def test_canonical_action_strips_artifact_prefix():
@@ -120,9 +132,165 @@ def test_pipeline_status_judges_drift_against_last_success(cp):
     assert behind["failed_on_head"] is False
 
 
+def test_only_a_failed_newest_execution_suppresses_a_retry(cp):
+    """failed_on_head must not swallow Superseded, Stopped or Cancelled.
+
+    All three mean HEAD was never successfully applied - a superseded execution
+    was replaced by a newer one, and a stopped or cancelled one never finished -
+    so treating them as "already failed on HEAD" suppresses exactly the retry
+    that would bring the account up to date.
+    """
+    head = {GLOBAL: HEAD_GLOBAL, ACCOUNT: HEAD_ACCOUNT}
+    name = "444444444444-customizations-pipeline"
+
+    for state, suppresses in (
+        ("Failed", True),
+        ("Superseded", False),
+        ("Stopped", False),
+        ("Cancelled", False),
+    ):
+        cp.pipelines[name] = [summary(state, HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=20)]
+        status = aft_pipelines.pipeline_status(cp, name, head)
+        assert status["drifted"] is True, state
+        assert status["failed_on_head"] is suppresses, state
+
+
+def test_validate_source_actions_checks_every_pipeline(cp):
+    """Item 6: sampling the first pipeline either blocked the estate or let a
+    later incompatible pipeline through unvalidated."""
+    names = sorted(n for n in cp.pipelines if n.endswith("-customizations-pipeline"))
+    # The outlier is deliberately NOT the first pipeline.
+    cp.source_action_names[names[-1]] = [GLOBAL, "aft-renamed"]
+
+    quarantined = aft_pipelines.validate_source_actions(cp, names, {GLOBAL, ACCOUNT})
+
+    assert list(quarantined) == [names[-1]]
+    assert "aft-renamed" in quarantined[names[-1]]
+    assert sorted(cp.described) == names
+
+
+def test_validate_source_actions_quarantines_an_unreadable_definition(cp):
+    names = ["111111111111-customizations-pipeline", "222222222222-customizations-pipeline"]
+    cp.describe_errors = {names[0]}
+
+    quarantined = aft_pipelines.validate_source_actions(cp, names, {GLOBAL, ACCOUNT})
+
+    assert "could not read its definition" in quarantined[names[0]]
+    assert names[1] not in quarantined
+
+
+def test_validate_source_actions_is_a_noop_without_tracked_actions(cp):
+    """SOURCE_ACTIONS unset means there is nothing to validate against."""
+    assert aft_pipelines.validate_source_actions(cp, ["111111111111-customizations-pipeline"], set()) == {}
+    assert cp.described == []
+
+
+def test_inspect_pipelines_isolates_a_failure_to_its_own_pipeline(cp):
+    names = sorted(n for n in cp.pipelines if n.endswith("-customizations-pipeline"))
+    cp.inspect_errors = {names[0]}
+
+    statuses, errors = aft_pipelines.inspect_pipelines(cp, names, {})
+
+    assert [s["pipeline"] for s in statuses] == names[1:]
+    assert errors == [{"pipeline": names[0], "error": f"PipelineNotFoundException: {names[0]}"}]
+
+
 def test_publish_is_a_noop_without_a_topic(sns):
     aft_pipelines.publish(sns, "", "subject", "message")
     assert sns.messages == []
+
+
+def test_account_id_comes_from_the_pipeline_name():
+    """AFT names every customizations pipeline after its account."""
+    assert aft_pipelines.account_id_from_pipeline("123456789012-customizations-pipeline") == (
+        "123456789012"
+    )
+    # Not AFT's naming: the state machine selects accounts, so this is unrunnable
+    # and the caller must report it rather than guess.
+    assert aft_pipelines.account_id_from_pipeline("team-alpha-customizations-pipeline") is None
+    assert aft_pipelines.account_id_from_pipeline("12345-customizations-pipeline") is None
+
+
+def test_customizations_input_sends_one_accounts_selector():
+    """AFT's request schema caps include at 4 items, so one selector carries all."""
+    payload = aft_pipelines.customizations_input(["333333333333", "111111111111"])
+
+    assert payload == {
+        "include": [{"type": "accounts", "target_value": ["111111111111", "333333333333"]}],
+        "bypass_steps": ["provisioning_bootstrap"],
+    }
+    # The state machine's first state injects this from $$.Execution.Name.
+    assert "get_execution_id" not in payload
+
+
+def test_customizations_input_selects_all_accounts_when_given_none():
+    assert aft_pipelines.customizations_input()["include"] == [{"type": "all"}]
+    assert aft_pipelines.customizations_input([])["include"] == [{"type": "all"}]
+
+
+def test_execution_name_is_deterministic_and_within_the_service_limit():
+    payload = aft_pipelines.customizations_input(["111111111111"])
+
+    name = aft_pipelines.execution_name("aft-pipeline-drift-monitor", "job-abc", payload)
+
+    assert name == aft_pipelines.execution_name("aft-pipeline-drift-monitor", "job-abc", payload)
+    assert len(name) <= 80
+    # Step Functions rejects whitespace and a set of punctuation in a name.
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", name)
+
+
+def test_execution_name_changes_with_the_account_set():
+    """A retry that resolved different accounts is new work, not a duplicate."""
+    one = aft_pipelines.customizations_input(["111111111111"])
+    two = aft_pipelines.customizations_input(["111111111111", "222222222222"])
+
+    assert aft_pipelines.execution_name("p", "same-key", one) != aft_pipelines.execution_name(
+        "p", "same-key", two
+    )
+
+
+def test_execution_name_survives_a_long_prefix_and_an_unsafe_key():
+    name = aft_pipelines.execution_name(
+        "a-very-long-name-prefix-that-a-caller-could-plausibly-configure",
+        "arn:aws:codepipeline:eu-central-1:123456789012:job/id with spaces",
+        {"include": [{"type": "all"}]},
+    )
+
+    assert len(name) <= 80
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", name)
+
+
+def test_invoke_customizations_reports_the_execution(sfn):
+    payload = aft_pipelines.customizations_input(["111111111111"])
+
+    result = aft_pipelines.invoke_customizations(sfn, STATE_MACHINE_ARN, payload, "exec-1")
+
+    assert result["already_invoked"] is False
+    assert result["execution_arn"].endswith(":execution:aft-invoke-customizations:exec-1")
+    assert sfn.executions[0]["input"] == payload
+
+
+def test_invoke_customizations_treats_a_duplicate_name_as_already_invoked(sfn):
+    """ExecutionAlreadyExists is the idempotency guarantee working, not a failure."""
+    payload = aft_pipelines.customizations_input(["111111111111"])
+    aft_pipelines.invoke_customizations(sfn, STATE_MACHINE_ARN, payload, "exec-1")
+
+    result = aft_pipelines.invoke_customizations(sfn, STATE_MACHINE_ARN, payload, "exec-1")
+
+    assert result["already_invoked"] is True
+    # StartExecution returns no ARN on conflict, so it is reconstructed - an
+    # operator still needs to be able to follow the original run.
+    assert result["execution_arn"].endswith(":execution:aft-invoke-customizations:exec-1")
+    assert len(sfn.executions) == 1
+
+
+def test_invoke_customizations_reraises_any_other_error(sfn):
+    sfn.fail = True
+
+    with pytest.raises(RuntimeError, match="AccessDenied"):
+        aft_pipelines.invoke_customizations(
+            sfn, STATE_MACHINE_ARN, {"include": [{"type": "all"}]}, "exec-1"
+        )
 
 
 def test_publish_sends_plain_text_by_default(sns, monkeypatch):

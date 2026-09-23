@@ -9,6 +9,6 @@ output "revision_probe_pipeline_name" {
 }
 
 output "full_run_function_name" {
-  description = "Invoke this function to run every pipeline on demand, drift or not."
+  description = "Invoke this function to re-apply the customizations to every AFT-managed account on demand, drift or not."
   value       = module.aft_pipeline_drift_monitor.full_run_function_name
 }

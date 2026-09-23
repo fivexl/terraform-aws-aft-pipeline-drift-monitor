@@ -104,6 +104,25 @@ resource "aws_cloudwatch_event_rule" "pipeline_failed" {
   description = "Notify on AFT customizations pipeline failures"
   tags        = var.tags
 
+  # pipeline_name_pattern selects which pipelines the Lambdas inspect and start;
+  # failure_pipeline_name_suffix scopes this rule's match AND the Lambdas' IAM
+  # pipeline ARNs. Two independent selectors for one set of pipelines means a
+  # mismatch is silent until runtime, where it surfaces as AccessDenied on
+  # StartPipelineExecution or as failure alerts that never arrive.
+  #
+  # The check builds the name AFT would give a pipeline with this suffix and
+  # asserts the pattern matches it, so the two selectors are proven to agree on
+  # at least one realistic name rather than merely both being non-empty. It is a
+  # precondition rather than a variable validation so the module keeps working on
+  # Terraform versions that do not allow a validation to reference another
+  # variable.
+  lifecycle {
+    precondition {
+      condition     = can(regex(var.pipeline_name_pattern, "123456789012${var.failure_pipeline_name_suffix}"))
+      error_message = "pipeline_name_pattern (${var.pipeline_name_pattern}) does not match a pipeline named 123456789012${var.failure_pipeline_name_suffix}, so it and failure_pipeline_name_suffix select different pipelines. The Lambdas would be denied StartPipelineExecution on the pipelines they discover, and failures on them would raise no alert. Set both to describe the same names."
+    }
+  }
+
   event_pattern = jsonencode({
     source        = ["aws.codepipeline"]
     "detail-type" = ["CodePipeline Pipeline Execution State Change"]

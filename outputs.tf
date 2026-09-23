@@ -3,6 +3,21 @@ output "sns_topic_arn" {
   value       = local.sns_topic_arn
 }
 
+output "notification_publisher_role_arns" {
+  description = "Every principal this module publishes to the notification topic with, keyed by what it is. When sns_topic_arn points at a topic this module does not manage, its owner has to authorize exactly these - so they are output by name rather than left to be guessed from the generated role names or discovered as a runtime AccessDenied. Granting sns:Publish to this account covers all of them at once."
+  value = {
+    drift_detector         = module.drift_detector.lambda_role_arn
+    status_report          = module.status_report.lambda_role_arn
+    full_run               = module.full_run.lambda_role_arn
+    pipeline_failed_events = aws_iam_role.eventbridge_sns.arn
+  }
+}
+
+output "kms_key_arn" {
+  description = "ARN of the key encrypting the notification topic and the probe pipeline's artifacts - either the one supplied via kms_key_arn or the one this module created. A cross-account topic owner needs this to know which key its publishers decrypt with."
+  value       = local.kms_key_arn
+}
+
 output "revision_probe_pipeline_name" {
   description = "Name of the pipeline that resolves HEAD of the customizations repositories through the AFT CodeConnections connection."
   value       = aws_codepipeline.revision_probe.name
@@ -49,7 +64,7 @@ output "full_run_function_arn" {
 }
 
 output "weekly_full_run_rule_name" {
-  description = "Name of the EventBridge rule that runs every pipeline weekly."
+  description = "Name of the EventBridge rule that re-applies the customizations to every AFT-managed account weekly."
   value       = aws_cloudwatch_event_rule.weekly_full_run.name
 }
 

@@ -40,6 +40,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already running, or there was simply nothing eligible), the SNS summary is
   no longer published. A dry run, a failed start, or no matching pipeline
   still always publishes.
+- `notification_publisher_role_arns` output: a named map of every principal this
+  module publishes to the notification topic with - the three Lambda execution
+  roles and the EventBridge failure-alert role. `sns_topic_arn`'s own description
+  tells a cross-account topic owner to authorize exactly these, but only the
+  EventBridge role was output, so the rest had to be guessed from generated role
+  names, granted at account scope, or discovered as a runtime `AccessDenied`.
+- `kms_key_arn` output, so a cross-account topic owner can see which key the
+  publishers decrypt with.
+- `artifact_access_log_bucket` / `artifact_access_log_prefix`: opt-in S3 server
+  access logging for the probe pipeline's artifact bucket. Off by default because
+  logging a bucket requires a second permanent bucket this module should not
+  create for you; worth enabling where AFT's S3 data events are disabled and
+  reads of the customization source archives would otherwise be recorded nowhere.
+- `cloudwatch_logs_kms_key_id`: encrypts the three Lambda log groups with a
+  customer-managed key. Deliberately separate from `kms_key_arn`, which cannot be
+  reused - a CloudWatch Logs key needs a different key policy.
+- `.github/dependabot.yml` covering github-actions, Terraform (root and the
+  example) and pip. Terraform modules, Python tooling and Action upgrades were
+  entirely manual, and the SHA-pinned reusable workflows below are only
+  maintainable with a bot watching them.
+- `.tflint.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks. TFLint's AWS
+  ruleset validates ARN shapes and deprecated arguments against the real API,
+  which `terraform validate` does not look at.
 
 ### Changed
 
@@ -71,6 +94,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped to the current region rather than every region.
 - The drift check's summary and SNS message now report the accounts handed to AFT
   and the resulting execution ARN, in place of the pipelines started and deferred.
+- **Terraform floor lowered from 1.9.0 to 1.6.1.** 1.9 was required solely
+  because two variable validations referenced other variables - `create_sns_topic`
+  reading `sns_topic_arn`, and `enable_chatbot` reading the two Slack ids. Both
+  are now resource preconditions, available since Terraform 1.2, which produce
+  the same plan-time failure. 1.6.1 is the floor of the management-AFT stacks
+  that consume this module, and CI validates on exactly that version.
+- IAM pipeline ARNs are scoped to the provider's region instead of every region.
+  All clients and resources operate in the AFT home region the module is deployed
+  into, so the wildcard only widened the grant to matching pipelines in every
+  other region of the account.
+- The reusable workflows in `base.yml` are pinned to a commit SHA rather than
+  `@main`, and the workflow declares `permissions: contents: read` at the top
+  level. A mutable ref meant CI could change under a PR that did not touch it,
+  while running with this repository's token. Note the upstream `1.0.0` tag is
+  *older* than the pinned commit, so pinning to the tag would have been an
+  unverified behaviour change rather than a stabilisation.
+- CI's Terraform security scan is **Trivy instead of tfsec**: the pinned SHA is
+  `fivexl/github-reusable-workflows@replace-tfsec-with-trivy`, one commit ahead of
+  that repository's `main`, which replaces the deprecated
+  `triat/terraform-security-scan` with `aquasecurity/trivy-action`. tfsec's HCL
+  parser cannot read Terraform 1.7+ `import` blocks. The check is renamed from
+  `terraform-job / TFSec` to `terraform-job / Trivy Security Scan`, so a
+  required-status-check rule naming the old one must be updated. This also aligns
+  CI with the `terraform_trivy` pre-commit hook added here - the same scanner, the
+  same `HIGH,CRITICAL` threshold.
+- All three Lambda functions set `publish = false`. EventBridge and CodePipeline
+  invoke the unqualified function ARN, so publishing only accumulated immutable
+  versions with no alias and no version-qualified rollback path.
 
 ### Removed
 
@@ -128,6 +179,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name AFT would give a pipeline carrying that suffix. An empty suffix was
   previously accepted and widened the Lambdas' IAM resource ARN - and the
   EventBridge failure match - to every CodePipeline in the account.
+
+### Notes
+
+- Requires **AFT >= 1.21.0**. On top of
+  `/aft/config/vcs/codeconnections-connection-arn`, the module now invokes
+  `aft-invoke-customizations` with `bypass_steps`, which is 1.21.0+. Terraform
+  reads `/aft/config/aft/version` and fails the plan below that floor.
+- Requires Terraform **>= 1.6.1**, down from 1.9.0, verified by CI validating on
+  exactly that version.
 
 ## [1.0.0] - 2026-08-20
 

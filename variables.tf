@@ -85,14 +85,9 @@ variable "notify_full_run_when_clean" {
 }
 
 variable "create_sns_topic" {
-  description = "Whether to create the notification topic. Ignored when sns_topic_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns_topic_arn."
+  description = "Whether to create the notification topic. Ignored when sns_topic_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns_topic_arn; a plan with neither fails a precondition, because the module has to have somewhere to publish."
   type        = bool
   default     = true
-
-  validation {
-    condition     = var.create_sns_topic || var.sns_topic_arn != ""
-    error_message = "Set create_sns_topic = true, or supply sns_topic_arn: the module has to have a topic to publish to."
-  }
 }
 
 variable "sns_topic_arn" {
@@ -183,6 +178,24 @@ variable "artifact_retention_days" {
   }
 }
 
+variable "artifact_access_log_bucket" {
+  description = "Name of an existing bucket to deliver S3 server access logs for the probe pipeline's artifact bucket to - typically the central log-archive destination. Leave empty for no access logging, which is the default because logging a bucket needs a second permanent bucket that this module should not create for you. Set it when the AFT deployment disables S3 data events in CloudTrail and you still want an object-level audit trail for reads of the customization source archives. The destination bucket must be in the same region and grant s3:PutObject to logging.s3.amazonaws.com for this source bucket."
+  type        = string
+  default     = ""
+}
+
+variable "artifact_access_log_prefix" {
+  description = "Key prefix for the delivered access logs. Ignored when artifact_access_log_bucket is empty. Defaults to the artifact bucket's own name plus a slash, so one destination bucket can serve several sources without their logs interleaving."
+  type        = string
+  default     = ""
+}
+
+variable "cloudwatch_logs_kms_key_id" {
+  description = "ARN of a KMS key to encrypt the three Lambda functions' CloudWatch log groups with. Leave empty to use CloudWatch Logs' own AWS-managed encryption. Pass the same customer-managed key the AFT deployment uses for CloudWatch Logs if your controls require CMK encryption there. The key policy must allow logs.<region>.amazonaws.com to kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey* and kms:Describe*, scoped with a kms:EncryptionContext:aws:logs:arn condition - note this is NOT kms_key_arn, which encrypts the SNS topic and the artifact bucket and is not reusable here, because a CloudWatch Logs key needs a different policy."
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Tags applied to every resource that supports them."
   type        = map(string)
@@ -194,14 +207,9 @@ variable "tags" {
 ########################################################################
 
 variable "enable_chatbot" {
-  description = "Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack_workspace_id."
+  description = "Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack_workspace_id. slack_workspace_id and slack_channel_id are both required when this is true, enforced by a precondition."
   type        = bool
   default     = false
-
-  validation {
-    condition     = !var.enable_chatbot || (var.slack_workspace_id != "" && var.slack_channel_id != "")
-    error_message = "enable_chatbot requires both slack_workspace_id and slack_channel_id."
-  }
 }
 
 variable "slack_workspace_id" {

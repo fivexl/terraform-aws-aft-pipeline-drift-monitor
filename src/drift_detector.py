@@ -339,8 +339,10 @@ def _format_message(summary, head, drifted, skipped, failing, dry_run) -> str:
         "",
         f"Pipelines checked: {summary['pipelines_checked']}",
         f"Behind HEAD:       {len(drifted)}",
-        f"{'Would re-run' if dry_run else 'Handed to AFT'}:     "
-        f"{len(summary['invoked_accounts'])} account(s)",
+        (
+            f"{'Would re-run' if dry_run else 'Handed to AFT'}:     "
+            f"{len(summary['invoked_accounts'])} account(s)"
+        ),
         "",
     ]
     if summary["execution_arn"]:
@@ -373,8 +375,10 @@ def _format_message(summary, head, drifted, skipped, failing, dry_run) -> str:
     if summary["unresolved_accounts"]:
         lines += [
             "",
-            "No account id in the pipeline name, so not re-runnable through AFT's "
-            "state machine (check pipeline_name_pattern):",
+            (
+                "No account id in the pipeline name, so not re-runnable through AFT's "
+                "state machine (check pipeline_name_pattern):"
+            ),
             *[f"  {s}" for s in summary["unresolved_accounts"]],
         ]
     if summary["inspect_errors"]:
@@ -386,15 +390,19 @@ def _format_message(summary, head, drifted, skipped, failing, dry_run) -> str:
     if summary["quarantined"]:
         lines += [
             "",
-            "Quarantined - source actions do not match the ones drift is judged on, "
-            "so these were neither compared nor re-run:",
+            (
+                "Quarantined - source actions do not match the ones drift is judged on, "
+                "so these were neither compared nor re-run:"
+            ),
             *[f"  {name}: {reason}" for name, reason in sorted(summary["quarantined"].items())],
         ]
     if summary["invoke_error"]:
         lines += [
             "",
-            "The aft-invoke-customizations state machine could not be invoked, so "
-            "NOTHING was re-run this check:",
+            (
+                "The aft-invoke-customizations state machine could not be invoked, so "
+                "NOTHING was re-run this check:"
+            ),
             f"  {summary['invoke_error']}",
         ]
     if dry_run:

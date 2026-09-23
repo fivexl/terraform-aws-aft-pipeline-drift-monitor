@@ -99,59 +99,142 @@ def test_one_unstartable_pipeline_does_not_abort_the_others(cp, sns):
 
     assert cp.started == STARTED[1:]
     assert result["failed_to_start"] == STARTED[:1]
-    assert cp.job_results == [("job-1", "success")]
+    # The remediation was partial, so the job must NOT go green: a successful
+    # probe pipeline is the only thing the EventBridge failure rule watches.
+    assert cp.job_results == [("job-1", "failure")]
     assert "could not be started" in sns.messages[0]["subject"]
 
 
-def test_renamed_source_action_fails_loudly(monkeypatch, cp, sns):
-    """A silent rename would mark every pipeline drifted and start them all.
+def test_a_failed_start_is_reported_even_when_notifications_are_off(monkeypatch, cp, sns):
+    """notify_on_drift is informational and must not hide an operational failure."""
+    monkeypatch.setenv("NOTIFY_ON_DRIFT", "false")
+    cp.start_errors = {STARTED[0]}
 
-    Here the module's own SOURCE_ACTIONS is the side that no longer matches AFT.
+    result = drift_detector.lambda_handler(job_event(), None)
+
+    assert result["failed_to_start"] == STARTED[:1]
+    assert cp.job_results == [("job-1", "failure")]
+    assert "could not be started" in sns.messages[0]["subject"]
+
+
+def test_a_clean_run_is_silent_when_notifications_are_off(monkeypatch, cp, sns):
+    """The flag still suppresses the purely informational drift summary."""
+    monkeypatch.setenv("NOTIFY_ON_DRIFT", "false")
+
+    result = drift_detector.lambda_handler(job_event(), None)
+
+    assert result["started"] == STARTED
+    assert cp.job_results == [("job-1", "success")]
+    assert sns.messages == []
+
+
+def test_source_actions_that_do_not_match_head_fail_loudly(monkeypatch, cp, sns):
+    """The module tracking an action the probe never resolved is a partial HEAD.
+
+    Judging drift on it would treat every account as current on the action that
+    is missing, so the run must fail rather than report a false all-clear.
     """
     monkeypatch.setenv("SOURCE_ACTIONS", "aft-global-customizations,aft-renamed")
 
     result = drift_detector.lambda_handler(job_event(), None)
 
-    assert "source action" in result["error"]
+    assert "partial HEAD" in result["error"]
+    assert "aft-renamed" in result["error"]
     assert cp.started == []
     assert cp.job_results == [("job-1", "failure")]
     assert sns.messages == []
 
 
-def test_guard_checks_one_real_aft_pipeline(cp):
-    """The check has to read AFT's side, not the probe's mirror of our own config."""
+def test_a_partial_head_from_the_probe_fails_the_job(cp):
+    """The probe resolved only one of the two sources - reproduces item 3."""
+    result = drift_detector.lambda_handler(
+        {
+            "CodePipeline.job": {
+                "id": "job-1",
+                "data": {"inputArtifacts": [{"name": GLOBAL, "revision": HEAD_GLOBAL}]},
+            }
+        },
+        None,
+    )
+
+    assert "partial HEAD" in result["error"]
+    assert cp.started == []
+    assert cp.job_results == [("job-1", "failure")]
+
+
+def test_guard_checks_every_aft_pipeline(cp):
+    """One hand-edited pipeline must neither block the estate nor slip through.
+
+    Sampling pipelines[0] did both, depending on which pipeline was the outlier.
+    """
     drift_detector.lambda_handler(job_event(), None)
 
-    assert cp.described == [CURRENT]
+    assert sorted(cp.described) == sorted(
+        [name for name in cp.pipelines if name.endswith("-customizations-pipeline")]
+    )
 
 
-def test_source_action_renamed_on_the_aft_side_fails_loudly(cp, sns):
-    """AFT renames a source action: the probe cannot see it, GetPipeline can."""
-    cp.source_action_names[CURRENT] = [
-        "aft-global-customizations",
-        "aft-account-customizations-v2",
-    ]
+def test_an_incompatible_pipeline_is_quarantined_and_the_rest_still_run(cp, sns):
+    """AFT's side renamed on ONE pipeline: it is quarantined, others proceed."""
+    cp.source_action_names[STARTED[0]] = [GLOBAL, "aft-account-customizations-v2"]
 
     result = drift_detector.lambda_handler(job_event(), None)
 
-    assert f"AFT pipeline {CURRENT} is configured with source actions" in result["error"]
-    assert "aft-account-customizations-v2" in result["error"]
-    assert cp.started == []
+    assert STARTED[0] in result["quarantined"]
+    assert "aft-account-customizations-v2" in result["quarantined"][STARTED[0]]
+    # The quarantined pipeline is neither compared nor started ...
+    assert STARTED[0] not in cp.started
+    assert STARTED[0] not in result["drifted"]
+    # ... while every compatible pipeline is still remediated.
+    assert cp.started == STARTED[1:]
+    # A quarantined pipeline is unremediated drift, so the job must fail.
     assert cp.job_results == [("job-1", "failure")]
-    assert sns.messages == []
+    assert "1 quarantined" in sns.messages[0]["subject"]
+    assert "Quarantined" in sns.messages[0]["message"]
 
 
-def test_source_action_added_on_the_aft_side_fails_loudly(cp):
-    cp.source_action_names[CURRENT] = [
-        "aft-global-customizations",
-        "aft-account-customizations",
-        "aft-account-provisioning-customizations",
-    ]
+def test_an_unreadable_pipeline_definition_is_quarantined_not_assumed_compatible(cp):
+    """An unreadable definition is not evidence the source actions still match."""
+    cp.describe_errors = {STARTED[0]}
 
     result = drift_detector.lambda_handler(job_event(), None)
 
-    assert "aft-account-provisioning-customizations" in result["error"]
-    assert cp.started == []
+    assert "could not read its definition" in result["quarantined"][STARTED[0]]
+    assert cp.started == STARTED[1:]
+    assert cp.job_results == [("job-1", "failure")]
+
+
+def test_one_uninspectable_pipeline_does_not_abort_the_estate(cp, sns):
+    """A deletion race on one pipeline used to cost every account its run."""
+    cp.inspect_errors = {STARTED[0]}
+
+    result = drift_detector.lambda_handler(job_event(), None)
+
+    assert [e["pipeline"] for e in result["inspect_errors"]] == [STARTED[0]]
+    assert cp.started == STARTED[1:]
+    assert result["pipelines_checked"] == 4
+    assert cp.job_results == [("job-1", "failure")]
+    assert "1 could not be inspected" in sns.messages[0]["subject"]
+
+
+def test_a_skipped_running_pipeline_is_notified(cp, sns):
+    """notify_on_drift promises a summary for skipped pipelines - item 10.
+
+    Only the already-running pipeline drifts here, so the old gate (drifted or
+    failing or failed_to_start) published nothing at all.
+    """
+    for name in [CURRENT, STARTED[0], STARTED[1], FAILING_ON_HEAD]:
+        cp.pipelines[name] = [summary("Succeeded", HEAD_GLOBAL, HEAD_ACCOUNT, minutes_ago=5)]
+
+    result = drift_detector.lambda_handler(job_event(), None)
+
+    assert result["skipped_already_running"] == [RUNNING]
+    assert result["drifted"] == []
+    assert len(sns.messages) == 1
+    assert "1 already running" in sns.messages[0]["subject"]
+    assert "Skipped, already running" in sns.messages[0]["message"]
+    # Nothing failed, so this is informational only: the job still succeeds.
+    assert cp.job_results == [("job-1", "success")]
 
 
 def test_guard_is_skipped_when_no_aft_pipelines_exist(cp):

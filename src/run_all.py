@@ -27,8 +27,8 @@ from aft_pipelines import (
     DEFAULT_PIPELINE_PATTERN,
     configure_logging,
     env_flag,
+    inspect_pipelines,
     list_aft_pipelines,
-    pipeline_status,
     publish,
     start_pipelines,
 )
@@ -74,6 +74,7 @@ def _is_actionable(summary: dict) -> bool:
         or not summary["pipelines_found"]
         or summary["started"]
         or summary["failed_to_start"]
+        or summary["inspect_errors"]
     )
 
 
@@ -87,8 +88,9 @@ def run_all() -> dict:
     logger.info("Found %d AFT customizations pipeline(s)", len(pipelines))
 
     # No HEAD comparison: an empty head means pipeline_status reports state and
-    # liveness only, which is all this Lambda needs.
-    statuses = [pipeline_status(codepipeline, name, {}) for name in pipelines]
+    # liveness only, which is all this Lambda needs. A pipeline that cannot be
+    # inspected is recorded and skipped rather than aborting the whole run.
+    statuses, inspect_errors = inspect_pipelines(codepipeline, pipelines, {})
     skipped = [s for s in statuses if s["active"]]
     # Oldest last execution first, so a cap below the account count rotates
     # through every account over successive runs instead of starving the tail.
@@ -105,24 +107,41 @@ def run_all() -> dict:
         "skipped_already_running": [s["pipeline"] for s in skipped],
         "deferred_over_limit": [s["pipeline"] for s in deferred],
         "failed_to_start": [s["pipeline"] for s in failed_to_start],
+        "inspect_errors": inspect_errors,
         "dry_run": dry_run,
         "eligible": [s["pipeline"] for s in eligible],
     }
 
 
+def _started_count(summary: dict) -> int:
+    """How many pipelines actually started - or, for a dry run, would have.
+
+    A live run must report ``len(started)``. Deriving it as eligible minus
+    deferred counts the pipelines *attempted*, so three successes and one
+    failure were reported as "started 4". Only a dry run has no started list to
+    count, and there the selected count is the number that matters.
+    """
+    if summary["dry_run"]:
+        return len(summary["eligible"]) - len(summary["deferred_over_limit"])
+    return len(summary["started"])
+
+
 def _subject(summary: dict) -> str:
     verb = "would start" if summary["dry_run"] else "started"
-    count = len(summary["eligible"]) - len(summary["deferred_over_limit"])
-    return f"AFT weekly full run: {verb} {count} of {summary['pipelines_found']} pipeline(s)"
+    subject = (
+        f"AFT weekly full run: {verb} {_started_count(summary)} "
+        f"of {summary['pipelines_found']} pipeline(s)"
+    )
+    problems = len(summary["failed_to_start"]) + len(summary["inspect_errors"])
+    return f"{subject}, {problems} failed" if problems else subject
 
 
 def _format_message(summary: dict) -> str:
-    count = len(summary["eligible"]) - len(summary["deferred_over_limit"])
     lines = [
         "AFT customizations weekly full run - every pipeline, drift or not.",
         "",
         f"Pipelines found: {summary['pipelines_found']}",
-        f"{'Would start' if summary['dry_run'] else 'Started'}:    {count}",
+        f"{'Would start' if summary['dry_run'] else 'Started'}:    {_started_count(summary)}",
         f"Skipped (running): {len(summary['skipped_already_running'])}",
     ]
     for label, key in (
@@ -133,6 +152,12 @@ def _format_message(summary: dict) -> str:
     ):
         if summary[key]:
             lines += ["", f"{label}:", *[f"  {name}" for name in summary[key]]]
+    if summary["inspect_errors"]:
+        lines += [
+            "",
+            "Could not be inspected - not started this run:",
+            *[f"  {e['pipeline']}: {e['error']}" for e in summary["inspect_errors"]],
+        ]
     if summary["dry_run"]:
         lines += ["", "DRY_RUN is set: nothing was actually started."]
     return "\n".join(lines)

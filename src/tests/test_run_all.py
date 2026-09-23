@@ -68,6 +68,23 @@ def test_one_unstartable_pipeline_does_not_abort_the_others(cp, sns):
     assert cp.started == BY_AGE[1:]
     assert summary["failed_to_start"] == BY_AGE[:1]
     assert "Could not be started" in sns.messages[0]["message"]
+    # Three started and one failed used to be reported as "started 4": the count
+    # was eligible minus deferred, which is the number ATTEMPTED.
+    assert sns.messages[0]["subject"] == (
+        "AFT weekly full run: started 3 of 5 pipeline(s), 1 failed"
+    )
+    assert "Started:    3" in sns.messages[0]["message"]
+
+
+def test_one_uninspectable_pipeline_does_not_abort_the_run(cp, sns):
+    cp.inspect_errors = {BY_AGE[0]}
+
+    summary = run_all.lambda_handler({}, None)
+
+    assert [e["pipeline"] for e in summary["inspect_errors"]] == [BY_AGE[0]]
+    assert sorted(cp.started) == sorted(BY_AGE[1:])
+    assert "1 failed" in sns.messages[0]["subject"]
+    assert "Could not be inspected" in sns.messages[0]["message"]
 
 
 def test_publish_failure_does_not_lose_the_run(sns):

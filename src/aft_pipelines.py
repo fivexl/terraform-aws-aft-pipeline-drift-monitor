@@ -233,15 +233,78 @@ def pipeline_status(client: Any, pipeline: str, head: dict[str, str]) -> dict[st
         # against a known older commit, and not fixable by another run.
         "no_success_found": succeeded is None,
         # The most recent attempt already carried HEAD and did not succeed, so
-        # restarting it would only repeat the same failure.
+        # restarting it would only repeat the same failure. Judged on ``Failed``
+        # alone: ``Superseded`` means a newer execution replaced this one and
+        # ``Stopped``/``Cancelled`` mean it never got to finish, so none of the
+        # three is evidence that HEAD cannot be applied - treating them as such
+        # suppresses exactly the retry that would bring the account up to date.
         "failed_on_head": (
-            bool(head)
-            and not drifted_against(attempted, head)
-            and latest_status not in ACTIVE_STATES
-            and latest_status != SUCCEEDED
+            bool(head) and not drifted_against(attempted, head) and latest_status == FAILED
         ),
         "active": bool(latest and latest.get("status") in ACTIVE_STATES),
     }
+
+
+def inspect_pipelines(
+    client: Any, pipelines: list[str], head: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Summarise every pipeline, isolating a failure to the pipeline that caused it.
+
+    Returns ``(statuses, errors)``. A deletion race, a throttle, or a malformed
+    pipeline used to abort the whole estate-level run: one account's transient
+    API error meant no other account was inspected, remediated or reported. Here
+    the failure is recorded against its own pipeline and the remaining ones are
+    still processed, so callers can report a partial result honestly instead of
+    losing the run.
+    """
+    statuses: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for name in pipelines:
+        try:
+            statuses.append(pipeline_status(client, name, head))
+        except Exception as exc:  # one bad pipeline must not abort the estate
+            logger.exception("Could not inspect %s", name)
+            errors.append({"pipeline": name, "error": str(exc)})
+    return statuses, errors
+
+
+def validate_source_actions(
+    client: Any, pipelines: list[str], expected: set[str]
+) -> dict[str, str]:
+    """Return ``{pipeline: reason}`` for every pipeline that must not be judged.
+
+    Drift is decided by comparing per-action commit ids keyed on source action
+    name, so a pipeline whose source actions are not exactly ``expected`` cannot
+    be compared against HEAD at all: its applied revisions would never match
+    HEAD's keys and it would look permanently behind, restarting on every run.
+
+    Every pipeline is checked, not a sample. AFT generates them from one
+    template, but a single hand-edited or partially-upgraded pipeline is the case
+    that matters - sampling the first one either blocks remediation for the whole
+    estate because of one outlier, or lets an incompatible later pipeline through
+    unvalidated. The cost is one ``GetPipeline`` per pipeline per run.
+
+    A pipeline whose definition cannot be read is quarantined too: an unreadable
+    definition is not evidence that its source actions still match. An empty
+    ``expected`` means SOURCE_ACTIONS is unset and there is nothing to validate
+    against, so nothing is quarantined.
+    """
+    if not expected:
+        return {}
+    quarantined: dict[str, str] = {}
+    for name in pipelines:
+        try:
+            actual = aft_pipeline_source_actions(client, name)
+        except Exception as exc:
+            logger.exception("Could not read the pipeline definition for %s", name)
+            quarantined[name] = f"could not read its definition: {exc}"
+            continue
+        if actual != expected:
+            quarantined[name] = (
+                f"source actions {sorted(actual)} do not match the tracked "
+                f"{sorted(expected)}"
+            )
+    return quarantined
 
 
 def _isoformat(value: Any) -> str | None:

@@ -72,6 +72,52 @@ resolve.
   no longer published. A dry run, a failed start, or no matching pipeline
   still always publishes.
 
+### Fixed
+
+- The drift detector now requires a **complete** HEAD before judging anything.
+  It previously rejected only an *empty* revision map, and drift comparison
+  iterates over the actions present in HEAD - so a probe execution that resolved
+  one of the two sources made every account look current on the missing one, and
+  the check reported success while leaving accounts behind HEAD. It now fails the
+  CodePipeline job instead, using the `head_is_complete` helper the status report
+  already used.
+- Source action names are validated on **every** AFT pipeline, not just the first
+  one. Sampling `pipelines[0]` meant one hand-edited or partially-upgraded
+  pipeline blocked remediation for the whole estate, while an incompatible
+  *later* pipeline was never validated and could be judged wrongly. An
+  incompatible pipeline is now quarantined and reported - neither compared nor
+  started - and every compatible pipeline is still remediated. A pipeline whose
+  definition cannot be read is quarantined too, rather than assumed compatible.
+- Pipeline inspection is isolated per pipeline in all three Lambdas. A deletion
+  race, a throttled API call or a malformed pipeline aborted the entire
+  estate-level run; the failure is now recorded against its own pipeline, the
+  rest are still processed, and the affected names are reported.
+- A run that did not fully remediate is no longer reported to CodePipeline as
+  successful. An unstartable pipeline, a pipeline that could not be inspected,
+  and a quarantined pipeline now fail the drift detector's job after every other
+  account has been processed - so the probe pipeline goes `FAILED` and the
+  EventBridge failure rule fires. `notify_on_drift` no longer suppresses these:
+  it gates the informational drift summary, not operational failures.
+- `notify_on_drift` now publishes for pipelines **skipped because a run is
+  already in flight**, which its own documentation promised. The scheduled status
+  report likewise treats drift on a still-running pipeline as actionable. Between
+  them, a stale pipeline stuck `InProgress` used to appear in neither.
+- `failed_on_head` is judged on a `Failed` newest execution only. It previously
+  treated every non-`Succeeded` terminal state as "already failed on HEAD",
+  including `Superseded`, `Stopped` and `Cancelled` - none of which is evidence
+  that HEAD cannot be applied, so a retry that would have fixed the account was
+  suppressed.
+- The weekly full run reports the number of pipelines it actually **started**.
+  The count was derived as eligible minus deferred, which is the number
+  *attempted*: three successes and one failure were reported as `started 4`. Dry
+  runs keep selected-count semantics, and the subject now carries a failure
+  count.
+- `failure_pipeline_name_suffix` is validated, and checked for consistency with
+  `pipeline_name_pattern` by a precondition that asserts the pattern matches the
+  name AFT would give a pipeline carrying that suffix. An empty suffix was
+  previously accepted and widened the Lambdas' IAM resource ARN - and the
+  EventBridge failure match - to every CodePipeline in the account.
+
 ### Notes
 
 - Requires **AFT >= 1.21.0**. The module reads

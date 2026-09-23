@@ -140,3 +140,58 @@ def test_an_incomplete_head_is_always_published_regardless_of_notify_when_clean(
 
     assert report["head_complete"] is False
     assert len(sns.messages) == 1
+
+
+def test_drift_on_a_running_pipeline_is_still_reported(cp, sns):
+    """Item 10: a report whose only content is active drift was suppressed.
+
+    333333333333 is behind HEAD with an execution in flight. It is excluded from
+    ``drifted`` on purpose - it is already being remediated - but that left the
+    scheduled report with nothing actionable, so nothing was published, and the
+    drift check had skipped it too. Between them the account was invisible.
+    """
+    current = cp.pipelines["111111111111-customizations-pipeline"]
+    for name in ("222222222222", "444444444444", "555555555555"):
+        cp.pipelines[f"{name}-customizations-pipeline"] = current
+
+    report = status_report.lambda_handler({}, None)
+
+    assert report["failed"] == []
+    assert report["drifted"] == []
+    assert [s["pipeline"] for s in report["drifted_running"]] == [
+        "333333333333-customizations-pipeline"
+    ]
+    assert len(sns.messages) == 1
+    assert sns.messages[0]["subject"] == (
+        "AFT pipeline report: 1 behind HEAD and still running"
+    )
+    assert "Behind HEAD, run already in flight" in sns.messages[0]["message"]
+
+
+def test_one_uninspectable_pipeline_does_not_abort_the_report(cp, sns):
+    cp.inspect_errors = {"222222222222-customizations-pipeline"}
+
+    report = status_report.lambda_handler({}, None)
+
+    assert [e["pipeline"] for e in report["inspect_errors"]] == [
+        "222222222222-customizations-pipeline"
+    ]
+    assert report["total"] == 4
+    assert "could not be inspected" in sns.messages[0]["subject"]
+    assert "Could not be inspected" in sns.messages[0]["message"]
+
+
+def test_an_uninspectable_pipeline_is_always_published(cp, sns):
+    """An all-clear report that silently dropped a pipeline is not an all-clear."""
+    current = cp.pipelines["111111111111-customizations-pipeline"]
+    for name in list(cp.pipelines):
+        if name.endswith("-customizations-pipeline"):
+            cp.pipelines[name] = current
+    cp.inspect_errors = {"222222222222-customizations-pipeline"}
+
+    report = status_report.lambda_handler({}, None)
+
+    assert report["failed"] == []
+    assert report["drifted"] == []
+    assert len(sns.messages) == 1
+    assert "could not be inspected" in sns.messages[0]["subject"]

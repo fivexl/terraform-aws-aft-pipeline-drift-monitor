@@ -163,7 +163,7 @@ resource "terraform_data" "preflight" {
 
 module "drift_detector" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.2.1"
+  version = "8.8.2"
 
   function_name = "${var.name_prefix}-drift-detector"
   description   = "Starts AFT customizations pipelines whose last successful run used an older commit than HEAD"
@@ -270,7 +270,7 @@ data "aws_iam_policy_document" "drift_detector" {
 
 module "status_report" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.2.1"
+  version = "8.8.2"
 
   function_name = "${var.name_prefix}-status-report"
   description   = "Publishes an SNS report of AFT customizations pipeline outcomes and remaining drift"
@@ -357,7 +357,7 @@ data "aws_iam_policy_document" "status_report" {
 
 module "full_run" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.2.1"
+  version = "8.8.2"
 
   function_name = "${var.name_prefix}-full-run"
   description   = "Starts every AFT customizations pipeline on a weekly schedule, regardless of drift"

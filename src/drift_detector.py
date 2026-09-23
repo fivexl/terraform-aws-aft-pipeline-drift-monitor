@@ -307,8 +307,10 @@ def _format_message(summary, head, drifted, skipped, deferred, failing, dry_run)
     if summary["quarantined"]:
         lines += [
             "",
-            "Quarantined - source actions do not match the ones drift is judged on, "
-            "so these were neither compared nor started:",
+            (
+                "Quarantined - source actions do not match the ones drift is judged on, "
+                "so these were neither compared nor started:"
+            ),
             *[f"  {name}: {reason}" for name, reason in sorted(summary["quarantined"].items())],
         ]
     if deferred:

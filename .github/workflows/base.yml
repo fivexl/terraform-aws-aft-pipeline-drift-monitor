@@ -13,23 +13,34 @@ permissions:
   contents: read
 
 jobs:
-  # Reusable workflows are pinned to a commit SHA, not @main: a mutable ref means
-  # CI can change under a PR that did not touch it, and the workflow runs with
-  # this repository's token. This is fivexl/github-reusable-workflows main as of
-  # 2026-07-06. Bump it deliberately - Dependabot's github-actions ecosystem
-  # tracks it and will open the PR.
+  # Reusable workflows are pinned to a commit SHA, not a branch or @main: a
+  # mutable ref means CI can change under a PR that did not touch it, and the
+  # workflow runs with this repository's token. Dependabot's github-actions
+  # ecosystem tracks the pin and will open the bump PR.
   #
-  # Note the 1.0.0 tag is OLDER than this commit, so pinning to the tag would be
-  # an unverified behaviour change rather than a stabilisation.
+  # This SHA is fivexl/github-reusable-workflows@replace-tfsec-with-trivy, which
+  # is main as of 2026-07-06 plus exactly one commit: it swaps the deprecated
+  # triat/terraform-security-scan (tfsec) for aquasecurity/trivy-action, because
+  # tfsec's HCL parser cannot read Terraform 1.7+ `import` blocks. Two
+  # consequences worth knowing:
+  #   - the check is now named "terraform-job / Trivy Security Scan" instead of
+  #     "terraform-job / TFSec", so any required-status-check rule naming TFSec
+  #     must be updated or it will wait forever on a check that never reports;
+  #   - that workflow calls aquasecurity/trivy-action@master, a mutable ref we
+  #     cannot pin from here, so the scanner itself can still change under us.
+  # Repoint at main once the branch is merged upstream.
+  #
+  # Note the upstream 1.0.0 tag is OLDER than this commit, so pinning to the tag
+  # would be an unverified behaviour change rather than a stabilisation.
   python-job:
-    uses: fivexl/github-reusable-workflows/.github/workflows/python-job.yml@f234ee717d5e5c56a314d8f4f701d3c85259b4e3
+    uses: fivexl/github-reusable-workflows/.github/workflows/python-job.yml@04564c92e4623c6ddd25b7d6f885b177692e068f
     with:
       python-version: "3.14"
       aws-default-region: "eu-central-1"
       working-directory: "src"
 
   terraform-job:
-    uses: fivexl/github-reusable-workflows/.github/workflows/terraform-job.yml@f234ee717d5e5c56a314d8f4f701d3c85259b4e3
+    uses: fivexl/github-reusable-workflows/.github/workflows/terraform-job.yml@04564c92e4623c6ddd25b7d6f885b177692e068f
     with:
       terraform-version: "1.6.1"
       aws-default-region: "eu-central-1"

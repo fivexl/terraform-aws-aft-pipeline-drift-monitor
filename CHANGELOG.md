@@ -110,6 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while running with this repository's token. Note the upstream `1.0.0` tag is
   *older* than the pinned commit, so pinning to the tag would have been an
   unverified behaviour change rather than a stabilisation.
+- CI's Terraform security scan is **Trivy instead of tfsec**: the pinned SHA is
+  `fivexl/github-reusable-workflows@replace-tfsec-with-trivy`, one commit ahead of
+  that repository's `main`, which replaces the deprecated
+  `triat/terraform-security-scan` with `aquasecurity/trivy-action`. tfsec's HCL
+  parser cannot read Terraform 1.7+ `import` blocks. The check is renamed from
+  `terraform-job / TFSec` to `terraform-job / Trivy Security Scan`, so a
+  required-status-check rule naming the old one must be updated. This also aligns
+  CI with the `terraform_trivy` pre-commit hook added here - the same scanner, the
+  same `HIGH,CRITICAL` threshold.
 - All three Lambda functions set `publish = false`. EventBridge and CodePipeline
   invoke the unqualified function ARN, so publishing only accumulated immutable
   versions with no alias and no version-qualified rollback path.

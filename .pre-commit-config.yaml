@@ -13,10 +13,27 @@ repos:
         # resolved until the first release is tagged. Drop this exclude once
         # v1.0.0 is on the Terraform Registry.
         exclude: ^examples/
+      - id: terraform_tflint
+        args:
+          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+      - id: terraform_trivy
+        args:
+          # The hook runs `trivy config`, which is the misconfiguration scanner
+          # already - no --scanners flag, and no source-code or secret scanning
+          # to turn off. gitleaks and Dependabot cover those.
+          - --args=--severity=HIGH,CRITICAL
+          # .terraform/ holds downloaded third-party modules. Scanning them
+          # reports findings in terraform-aws-modules/lambda's own example
+          # Dockerfiles, which this repository neither ships nor can fix.
+          - --args=--skip-dirs=**/.terraform
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.5
     hooks:
       - id: ruff-check
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
   - repo: local
     hooks:
       - id: terraform-docs-root

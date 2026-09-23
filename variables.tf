@@ -61,35 +61,13 @@ variable "detect_changes" {
 }
 
 variable "dry_run" {
-  description = "Detect and report without starting any AFT pipeline. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation."
+  description = "Detect and report without invoking AFT's customizations state machine. Applies to both the daily drift check and the weekly full run. Useful for the first few days in a new organisation."
   type        = bool
   default     = false
 }
 
-variable "max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single drift check. The remainder is deferred to the next run, which keeps CodeBuild concurrency and Terraform state contention under control."
-  type        = number
-  default     = 20
-
-  validation {
-    condition     = var.max_pipelines_per_run >= 1 && floor(var.max_pipelines_per_run) == var.max_pipelines_per_run
-    error_message = "max_pipelines_per_run must be a whole number of at least 1."
-  }
-}
-
-variable "full_run_max_pipelines_per_run" {
-  description = "Maximum number of AFT pipelines to start in a single weekly full run. Defaults to max_pipelines_per_run, but the two are independent: the daily drift check only has to start pipelines that actually drifted, while the full run starts every account regardless, so the same cap can be too low to cover the whole estate weekly. The full run selects oldest-execution-first, so a cap below your account count rotates through every account over successive weeks rather than starving the same accounts - set this at or above your account count if you want every account re-applied every week. Set to -1 to reuse max_pipelines_per_run (the default)."
-  type        = number
-  default     = -1
-
-  validation {
-    condition     = var.full_run_max_pipelines_per_run == -1 || (var.full_run_max_pipelines_per_run >= 1 && floor(var.full_run_max_pipelines_per_run) == var.full_run_max_pipelines_per_run)
-    error_message = "full_run_max_pipelines_per_run must be -1 (use max_pipelines_per_run) or a whole number of at least 1."
-  }
-}
-
 variable "notify_on_drift" {
-  description = "Publish an SNS summary for each drift check that found something to report - drifted, started, skipped, failing-on-HEAD or unstartable pipelines. Does not affect the scheduled status report or the weekly full run summary, which have their own notification behaviour, nor the EventBridge failure alerts, which are always published."
+  description = "Publish an SNS summary for each drift check that found something to report - drifted, skipped, failing-on-HEAD, quarantined or uninspectable pipelines. Operational failures (a state machine invocation that did not land, a quarantined or uninspectable pipeline) are published regardless of this flag: it gates the informational summary, not failures. Does not affect the scheduled status report or the weekly full run summary, which have their own notification behaviour, nor the EventBridge failure alerts, which are always published."
   type        = bool
   default     = true
 }
@@ -101,20 +79,15 @@ variable "notify_status_report_when_clean" {
 }
 
 variable "notify_full_run_when_clean" {
-  description = "Publish the weekly full run summary even when nothing was started and nothing failed to start - every pipeline was already running, or there was simply nothing eligible. Defaults to false, so only an actionable summary (something started, something failed to start, a dry run, or no matching pipeline) is sent. Does not affect the drift check or the scheduled status report, which have their own notification behaviour."
+  description = "Publish the weekly full run summary even when the invocation was a duplicate of an earlier delivery of the same scheduled event, so nothing was started twice. Defaults to false, so only an actionable summary (a fresh invocation, a failed invocation, or a dry run) is sent. Does not affect the drift check or the scheduled status report, which have their own notification behaviour."
   type        = bool
   default     = false
 }
 
 variable "create_sns_topic" {
-  description = "Whether to create the notification topic. Ignored when sns_topic_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns_topic_arn."
+  description = "Whether to create the notification topic. Ignored when sns_topic_arn is set - an existing topic always wins, so nothing is created. Set this to false only together with sns_topic_arn; a plan with neither fails a precondition, because the module has to have somewhere to publish."
   type        = bool
   default     = true
-
-  validation {
-    condition     = var.create_sns_topic || var.sns_topic_arn != ""
-    error_message = "Set create_sns_topic = true, or supply sns_topic_arn: the module has to have a topic to publish to."
-  }
 }
 
 variable "sns_topic_arn" {
@@ -166,9 +139,9 @@ variable "status_report_timeout" {
 }
 
 variable "full_run_timeout" {
-  description = "Timeout in seconds for the weekly full run Lambda. It reads the last 10 executions of every AFT pipeline before starting it, so scale it with the number of vended accounts."
+  description = "Timeout in seconds for the weekly full run Lambda. It makes one StartExecution call and inspects nothing, so it needs very little."
   type        = number
-  default     = 600
+  default     = 60
 }
 
 variable "log_retention_in_days" {
@@ -205,6 +178,24 @@ variable "artifact_retention_days" {
   }
 }
 
+variable "artifact_access_log_bucket" {
+  description = "Name of an existing bucket to deliver S3 server access logs for the probe pipeline's artifact bucket to - typically the central log-archive destination. Leave empty for no access logging, which is the default because logging a bucket needs a second permanent bucket that this module should not create for you. Set it when the AFT deployment disables S3 data events in CloudTrail and you still want an object-level audit trail for reads of the customization source archives. The destination bucket must be in the same region and grant s3:PutObject to logging.s3.amazonaws.com for this source bucket."
+  type        = string
+  default     = ""
+}
+
+variable "artifact_access_log_prefix" {
+  description = "Key prefix for the delivered access logs. Ignored when artifact_access_log_bucket is empty. Defaults to the artifact bucket's own name plus a slash, so one destination bucket can serve several sources without their logs interleaving."
+  type        = string
+  default     = ""
+}
+
+variable "cloudwatch_logs_kms_key_id" {
+  description = "ARN of a KMS key to encrypt the three Lambda functions' CloudWatch log groups with. Leave empty to use CloudWatch Logs' own AWS-managed encryption. Pass the same customer-managed key the AFT deployment uses for CloudWatch Logs if your controls require CMK encryption there. The key policy must allow logs.<region>.amazonaws.com to kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey* and kms:Describe*, scoped with a kms:EncryptionContext:aws:logs:arn condition - note this is NOT kms_key_arn, which encrypts the SNS topic and the artifact bucket and is not reusable here, because a CloudWatch Logs key needs a different policy."
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Tags applied to every resource that supports them."
   type        = map(string)
@@ -216,14 +207,9 @@ variable "tags" {
 ########################################################################
 
 variable "enable_chatbot" {
-  description = "Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack_workspace_id."
+  description = "Subscribe a Slack channel to the notification topic through Amazon Q Developer in chat applications (AWS Chatbot). Requires the Slack workspace to have been authorized once by hand in the console, which is what produces slack_workspace_id. slack_workspace_id and slack_channel_id are both required when this is true, enforced by a precondition."
   type        = bool
   default     = false
-
-  validation {
-    condition     = !var.enable_chatbot || (var.slack_workspace_id != "" && var.slack_channel_id != "")
-    error_message = "enable_chatbot requires both slack_workspace_id and slack_channel_id."
-  }
 }
 
 variable "slack_workspace_id" {

@@ -83,4 +83,15 @@ resource "aws_chatbot_slack_channel_configuration" "this" {
   logging_level         = var.chatbot_logging_level
 
   tags = var.tags
+
+  # A cross-input assertion, so a precondition rather than a validation on
+  # enable_chatbot - see terraform_data.preflight in main.tf for why. This
+  # resource only exists when enable_chatbot is true, which is exactly when the
+  # two ids are required, so the check lands where it applies.
+  lifecycle {
+    precondition {
+      condition     = var.slack_workspace_id != "" && var.slack_channel_id != ""
+      error_message = "enable_chatbot requires both slack_workspace_id and slack_channel_id. The workspace id comes from authorizing the workspace by hand in the Amazon Q Developer in chat applications console; the channel id comes from the Slack channel's details, not its name."
+    }
+  }
 }

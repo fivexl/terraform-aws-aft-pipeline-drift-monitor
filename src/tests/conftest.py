@@ -6,6 +6,7 @@ handlers exercise, so a logic regression fails loudly.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,9 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 GLOBAL = "aft-global-customizations"
 ACCOUNT = "aft-account-customizations"
 PROBE = "aft-pipeline-drift-monitor-revision-probe"
+STATE_MACHINE_ARN = (
+    "arn:aws:states:eu-central-1:123456789012:stateMachine:aft-invoke-customizations"
+)
 HEAD_GLOBAL = "1111111111111111111111111111111111111111"
 HEAD_ACCOUNT = "2222222222222222222222222222222222222222"
 OLD_GLOBAL = "9999999999999999999999999999999999999999"
@@ -70,13 +74,10 @@ class FakeCodePipeline:
 
     def __init__(self, pipelines: dict[str, list[dict]]):
         self.pipelines = pipelines
-        self.started: list[str] = []
         self.job_results: list[tuple[str, str]] = []
         #: Set to mimic an in-progress execution that has not recorded its
         #: artifact revisions yet.
         self.hide_artifact_revisions = False
-        #: Pipeline names whose start_pipeline_execution should raise.
-        self.start_errors: set[str] = set()
         #: Pipeline names whose execution history lookups should raise, to mimic a
         #: deletion race or a throttled API call on one pipeline.
         self.inspect_errors: set[str] = set()
@@ -175,10 +176,10 @@ class FakeCodePipeline:
         raise AssertionError(f"unknown execution {pipelineExecutionId}")
 
     def start_pipeline_execution(self, name: str):
-        if name in self.start_errors:
-            raise RuntimeError(f"PipelineNotFoundException: {name}")
-        self.started.append(name)
-        return {"pipelineExecutionId": f"new-exec-{name}"}
+        raise AssertionError(
+            "the module must re-run accounts through aft-invoke-customizations, "
+            f"not start {name} directly"
+        )
 
     # -- job protocol ------------------------------------------------------
     def put_job_success_result(self, jobId: str):  # noqa: N803
@@ -192,6 +193,37 @@ class FakeCodePipeline:
         # The API rejects an empty message, so record it and let tests assert on it.
         assert failureDetails["message"], "failureDetails.message must be 1-5000 characters"
         self.job_results.append((jobId, "failure"))
+
+
+class FakeStepFunctions:
+    """In-memory stand-in for the Step Functions client.
+
+    Records every StartExecution and enforces the name uniqueness that makes an
+    invocation idempotent, so a test can prove a duplicate delivery is a no-op.
+    """
+
+    def __init__(self):
+        self.executions: list[dict] = []
+        #: Set to make start_execution raise, as an IAM denial would.
+        self.fail = False
+
+    def start_execution(self, stateMachineArn: str, name: str, input: str):  # noqa: N803
+        if self.fail:
+            raise RuntimeError("AccessDeniedException")
+        if any(e["name"] == name for e in self.executions):
+            raise _ExecutionAlreadyExistsError(name)
+        self.executions.append(
+            {"stateMachineArn": stateMachineArn, "name": name, "input": json.loads(input)}
+        )
+        return {"executionArn": f"{stateMachineArn.replace(':stateMachine:', ':execution:')}:{name}"}
+
+
+class _ExecutionAlreadyExistsError(Exception):
+    """Shaped like botocore's ClientError: the code lives in .response."""
+
+    def __init__(self, name: str):
+        super().__init__(f"Execution already exists: {name}")
+        self.response = {"Error": {"Code": "ExecutionAlreadyExists", "Message": name}}
 
 
 class FakeSns:
@@ -246,6 +278,11 @@ def cp(pipelines) -> FakeCodePipeline:
 
 
 @pytest.fixture
+def sfn() -> FakeStepFunctions:
+    return FakeStepFunctions()
+
+
+@pytest.fixture
 def sns() -> FakeSns:
     return FakeSns()
 
@@ -255,5 +292,6 @@ def base_env(monkeypatch):
     monkeypatch.setenv("PROBE_PIPELINE_NAME", PROBE)
     monkeypatch.setenv("SNS_TOPIC_ARN", "arn:aws:sns:eu-central-1:123456789012:aft-drift")
     monkeypatch.setenv("SOURCE_ACTIONS", f"{GLOBAL},{ACCOUNT}")
-    monkeypatch.setenv("MAX_PIPELINES_PER_RUN", "20")
+    monkeypatch.setenv("AFT_INVOKE_STATE_MACHINE_ARN", STATE_MACHINE_ARN)
+    monkeypatch.setenv("NAME_PREFIX", "aft-pipeline-drift-monitor")
     monkeypatch.delenv("DRY_RUN", raising=False)

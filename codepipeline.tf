@@ -174,11 +174,22 @@ resource "aws_iam_role_policy" "probe_pipeline" {
 # are only fetched so CodePipeline reports the commit it resolved.
 ########################################################################
 
-#tfsec:ignore:AVD-AWS-0089 - access logging would need a second permanent bucket to log a bucket that only ever holds ephemeral repo zips
+#tfsec:ignore:AVD-AWS-0089 - access logging is opt-in via artifact_access_log_bucket: logging a bucket needs a second permanent bucket, which this module must not create on a caller's behalf for a bucket that only holds ephemeral repo zips
 resource "aws_s3_bucket" "artifacts" {
   bucket        = var.artifact_bucket_name != "" ? var.artifact_bucket_name : "${var.name_prefix}-artifacts-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
   tags          = var.tags
+}
+
+# Opt-in object-level audit trail for reads of the customization source archives.
+# Worth turning on when the AFT deployment disables S3 data events in CloudTrail,
+# which otherwise leaves those reads unrecorded anywhere.
+resource "aws_s3_bucket_logging" "artifacts" {
+  count = var.artifact_access_log_bucket != "" ? 1 : 0
+
+  bucket        = aws_s3_bucket.artifacts.id
+  target_bucket = var.artifact_access_log_bucket
+  target_prefix = var.artifact_access_log_prefix != "" ? var.artifact_access_log_prefix : "${aws_s3_bucket.artifacts.id}/"
 }
 
 resource "aws_s3_bucket_versioning" "artifacts" {

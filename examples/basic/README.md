@@ -62,7 +62,7 @@ To see what either would do before letting it invoke AFT, set
 
 | Name | Source | Version |
 |------|--------|---------|
-| <a name="module_aft_pipeline_drift_monitor"></a> [aft\_pipeline\_drift\_monitor](#module\_aft\_pipeline\_drift\_monitor) | ../.. | n/a |
+| <a name="module_aft_pipeline_drift_monitor"></a> [aft\_pipeline\_drift\_monitor](#module\_aft\_pipeline\_drift\_monitor) | fivexl/aft-pipeline-drift-monitor/aws | ~> 1.0 |
 
 ## Resources
 

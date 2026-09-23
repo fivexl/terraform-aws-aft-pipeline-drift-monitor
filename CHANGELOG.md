@@ -62,9 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example) and pip. Terraform modules, Python tooling and Action upgrades were
   entirely manual, and the SHA-pinned reusable workflows below are only
   maintainable with a bot watching them.
-- `.tflint.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks. TFLint's AWS
-  ruleset validates ARN shapes and deprecated arguments against the real API,
-  which `terraform validate` does not look at.
+- `.tflint-aws.hcl` plus TFLint, Trivy and gitleaks pre-commit hooks, and a
+  `tflint` CI job that runs `tflint --init` first. TFLint's AWS ruleset validates
+  ARN shapes and deprecated arguments against the real API, which
+  `terraform validate` does not look at. The config is deliberately *not* named
+  `.tflint.hcl`: the reusable workflow runs a bare `tflint` with no
+  `tflint --init`, so an auto-discovered config declaring an external plugin fails
+  with `Plugin 'aws' not found`. Both callers that should load it - the pre-commit
+  hook and the CI job - name it explicitly.
 
 ### Changed
 

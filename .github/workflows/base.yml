@@ -59,6 +59,25 @@ jobs:
       - run: terraform init -backend=false
       - run: terraform validate -no-color
 
+  # The reusable workflow's TFLint job runs a bare `tflint` with no
+  # `tflint --init`, so it can only ever exercise the bundled rules - and it
+  # fails outright on a discoverable .tflint.hcl that declares an external
+  # plugin. Hence .tflint-aws.hcl (off the auto-discovered path) and this job,
+  # which is what actually runs the AWS ruleset in CI.
+  tflint:
+    name: tflint with the AWS ruleset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.64.0
+      - run: tflint --init --config="$PWD/.tflint-aws.hcl"
+        env:
+          # https://github.com/terraform-linters/tflint/blob/master/docs/user-guide/plugins.md#avoiding-rate-limiting
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: tflint -f compact --config="$PWD/.tflint-aws.hcl"
+
   # The reusable workflow has its terraform-docs job commented out, so README
   # staleness is otherwise caught only for contributors who installed pre-commit.
   terraform-docs:

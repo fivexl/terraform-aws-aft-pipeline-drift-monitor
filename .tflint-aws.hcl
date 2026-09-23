@@ -1,5 +1,11 @@
 # TFLint configuration.
 #
+# Deliberately NOT named .tflint.hcl. tflint auto-discovers that name, and the
+# reusable CI workflow runs a bare `tflint` with no `tflint --init`, so a
+# discoverable config declaring an external plugin fails with
+# "Plugin `aws` not found". Both callers that should use this pass it explicitly:
+# the terraform_tflint pre-commit hook, and the tflint job in base.yml.
+#
 # The AWS ruleset is what makes tflint worth running here: it validates instance
 # types, ARN shapes and deprecated arguments against the real API, which
 # `terraform validate` does not look at.

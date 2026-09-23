@@ -15,7 +15,7 @@ repos:
         exclude: ^examples/
       - id: terraform_tflint
         args:
-          - --args=--config=__GIT_WORKING_DIR__/.tflint.hcl
+          - --args=--config=__GIT_WORKING_DIR__/.tflint-aws.hcl
       - id: terraform_trivy
         args:
           # The hook runs `trivy config`, which is the misconfiguration scanner

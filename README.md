@@ -259,7 +259,7 @@ Deploy into the **AFT management account**, in the **AFT home region**.
 ```hcl
 module "aft_pipeline_drift_monitor" {
   source  = "fivexl/aft-pipeline-drift-monitor/aws"
-  version = "~> 1.0"
+  version = "~> 1.1"
 
   schedule_expression          = "cron(0 2 * * ? *)"    # find and re-run stale accounts
   report_schedule_expression   = "cron(0 8 * * ? *)"    # report on what they did
@@ -445,6 +445,7 @@ deliberately separate inputs rather than one reused key.
 ## Releases
 
 Released from the Terraform Registry as `fivexl/aft-pipeline-drift-monitor/aws`.
+The first published version is **1.1.0**; `1.0.0` was developed but never tagged.
 Each release is tagged in this repository and its notes live in
 [`CHANGELOG.md`](CHANGELOG.md); pin with a `~>` constraint so a breaking major
 never arrives unasked.

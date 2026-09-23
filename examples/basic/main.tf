@@ -8,7 +8,7 @@ provider "aws" {
 # both of which live there.
 module "aft_pipeline_drift_monitor" {
   source  = "fivexl/aft-pipeline-drift-monitor/aws"
-  version = "~> 1.0"
+  version = "~> 1.1"
 
   # Daily at 02:00 UTC: resolve HEAD and re-run every stale pipeline.
   schedule_expression = "cron(0 2 * * ? *)"

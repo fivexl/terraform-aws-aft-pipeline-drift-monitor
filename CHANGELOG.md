@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-23
+
 ### Added
 
 - A plan-time AFT version floor. Terraform reads `/aft/config/aft/version` and
@@ -188,8 +190,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads `/aft/config/aft/version` and fails the plan below that floor.
 - Requires Terraform **>= 1.6.1**, down from 1.9.0, verified by CI validating on
   exactly that version.
+- This is the **first published version**. `1.0.0` below was developed but never
+  tagged or pushed to the Terraform Registry, so the two variables removed above
+  were never part of a released interface and no consumer can be pinned to them -
+  which is why their removal ships as a minor bump rather than a major one.
 
 ## [1.0.0] - 2026-08-20
+
+Never tagged; superseded by `1.1.0` before release. Kept as the record of what
+the module looked like when it was first reviewed.
 
 ### Added
 
@@ -239,5 +248,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires Terraform **>= 1.9.0**: the `create_sns_topic` and `enable_chatbot`
   validations reference other variables, which earlier versions do not allow.
 
-[Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.0.0
+[Unreleased]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/fivexl/terraform-aws-aft-pipeline-drift-monitor/releases/tag/v1.1.0

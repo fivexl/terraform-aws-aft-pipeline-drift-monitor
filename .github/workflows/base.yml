@@ -55,7 +55,7 @@ jobs:
     container:
       image: hashicorp/terraform:1.6.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: terraform init -backend=false
       - run: terraform validate -no-color
 
@@ -68,7 +68,7 @@ jobs:
     name: tflint with the AWS ruleset
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: terraform-linters/setup-tflint@v6
         with:
           tflint_version: v0.64.0
@@ -84,7 +84,7 @@ jobs:
     name: terraform-docs is current
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: terraform-docs/gh-actions@v1.4.1
         with:
           working-dir: .,examples/basic
